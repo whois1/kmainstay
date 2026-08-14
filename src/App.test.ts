@@ -1,0 +1,92 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import App from './App.vue'
+
+const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+
+describe('K-Mainstay UI', () => {
+  it('logs in and opens the single organisation conversation', async () => {
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({}, 401))
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    expect(wrapper.get('h1').text()).toBe('Welcome back')
+    await wrapper.get('input[type=email]').setValue('michael@example.com')
+    await wrapper.get('input[type=password]').setValue('secret')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/session', expect.objectContaining({ method: 'POST' }))
+    expect(wrapper.text()).toContain('Mainstay')
+    expect(wrapper.text()).toContain('general')
+  })
+
+  it('shows chronological complete messages and posts from the composer', async () => {
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'm1', author_name: 'Michael', author_kind: 'human', body: 'Hello **bot**', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
+        { id: 'm2', author_name: 'Hector', author_kind: 'bot', body: 'Hello human', created_at: '2026-01-01T00:00:01Z', sequence: 2 },
+      ]))
+      .mockImplementationOnce(() => json({ id: 'm3', author_name: 'Michael', author_kind: 'human', body: 'Next', created_at: '2026-01-01T00:00:02Z', sequence: 3 }, 201))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    const messages = wrapper.findAll('[data-testid=message]')
+    expect(messages[0].text()).toContain('Michael')
+    expect(messages[0].text()).toContain('Hello bot')
+    expect(messages[1].text()).toContain('HectorBOT')
+    expect(messages[1].text()).toContain('Hello human')
+    expect(wrapper.find('[data-testid=message] img').exists()).toBe(false)
+    await wrapper.get('textarea').setValue('Next')
+    await wrapper.get('[data-testid=composer]').trigger('submit')
+    await flushPromises()
+    expect(fetcher).toHaveBeenLastCalledWith('/api/conversations/c1/messages', expect.objectContaining({ method: 'POST' }))
+    expect(wrapper.text()).toContain('Next')
+  })
+
+  it('creates a bot and presents its API key once with copy warning', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', api_key: 'km_live_lookup_secret' }, 201))
+    Object.assign(navigator, { clipboard: { writeText: vi.fn() } })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=add-user]').trigger('click')
+    await wrapper.get('[data-testid=choose-bot]').trigger('click')
+    await wrapper.get('[data-testid=bot-name]').setValue('Hector')
+    await wrapper.get('[data-testid=create-bot]').trigger('submit')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Copy this key now')
+    expect(wrapper.text()).toContain('km_live_lookup_secret')
+    await wrapper.get('[data-testid=copy-key]').trigger('click')
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('km_live_lookup_secret')
+  })
+
+  it('creates a private conversation with selected organisation users', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }]))
+    fetcher.mockImplementationOnce(() => json({ id: 'c2', name: 'Planning', visibility: 'members' }, 201))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=new-conversation]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=conversation-name]').setValue('Planning')
+    await wrapper.get('input[value=b1]').setValue(true)
+    await wrapper.get('[data-testid=create-conversation]').trigger('submit')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', expect.objectContaining({ body: JSON.stringify({ name: 'Planning', visibility: 'members', member_ids: ['b1'] }) }))
+    expect(wrapper.text()).toContain('Planning')
+  })
+})
+
+function loadedFetcher() {
+  return vi.fn()
+    .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+    .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+    .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+    .mockImplementationOnce(() => json([]))
+}

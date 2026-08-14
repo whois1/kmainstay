@@ -1,213 +1,158 @@
-# Proposed Phase 1 architecture and protocol
+# MVP architecture
 
-**Status:** proposal for validation through a disposable spike. Nothing here is a settled production design.
+## Status
 
-## Constraints
+This is the agreed architecture for the first local and single-VPS MVP. It is intentionally narrow and may change with evidence.
 
-- Agent setup should require only a workspace-issued token.
-- The agent initiates outbound traffic; no inbound ports, reverse proxy, or webhook setup.
-- Agents and humans are first-class message authors.
-- Agent identity must not be coupled to Hermes.
-- Activity must be structured and must not contain private chain-of-thought.
-- Phase 1 remains a modular monolith.
-
-## Smallest viable shape
+## Shape
 
 ```text
-Browser
-  │ HTTPS + realtime
-  ▼
-Modular monolith
-  ├─ account/workspace HTTP API
-  ├─ channel/message service
-  ├─ attachment service
-  ├─ realtime fan-out
-  └─ agent gateway
-       │ outbound persistent connection
-       ▼
-  Hermes connector
-
-Persistence
-  ├─ PostgreSQL
-  └─ S3-compatible object storage
+Browser or bot runtime
+        │ HTTPS / WebSocket
+        ▼
+      Caddy                 VPS only
+        │ localhost HTTP
+        ▼
+One Go process
+  ├─ standard net/http API
+  ├─ WebSocket event feed
+  ├─ embedded Vue application
+  ├─ embedded SQL migrations
+  └─ database/sql
+        │
+        ▼
+SQLite database in WAL mode
 ```
 
-For the spike, a single process and local storage are acceptable. Do not add a queue, cache, microservices, Kubernetes, or a separate orchestration engine.
+Local development does not require Caddy. The Go process and Vite development server are sufficient.
 
-## Phase 1 domain boundary
+## Technology decisions
 
-Likely persisted concepts:
+- Go standard `net/http`; no Chi or backend web framework.
+- Vue 3, TypeScript, and Vite.
+- `database/sql` with a pure-Go SQLite driver.
+- No ORM initially. Database access stays behind focused Go packages so an ORM or generated query layer can be introduced later if handwritten SQL becomes a demonstrated maintenance cost.
+- WebSocket for realtime event delivery; HTTP for history and mutations.
+- Safe Markdown source stored unchanged and rendered client-side with raw HTML disabled.
+- One systemd-managed binary behind Caddy on one VPS.
+- No Docker.
 
-- `Workspace`
-- `User`
-- `Membership`
-- `Agent`
-- `Channel`
-- `ChannelMember` or equivalent channel allow-list
-- `Message`
-- `Attachment`
-- `ActivityEvent`
-- `AgentConnection`
-- hashed `AgentToken`
+## Domain
 
-`Runtime`, `Project`, `Instruction`, `Skill`, `Memory`, `Capability`, `Credential`, and `Task` remain outside Phase 1 until evidence requires them.
+```text
+Organisation
+User                  kind: human | bot
+OrganisationMembership
+Conversation          visibility: organisation | members
+ConversationMember
+Message
+HumanSession
+APIKey
+RealtimeEvent
+```
 
-Keep a small runtime-type field or connector boundary if useful, but do not implement a general runtime platform.
+Organisation-visible conversations are available to every organisation user. Member-visible conversations are private to their selected users. Nested message threads are deferred.
 
-## Agent connection
+There is no separate Phase 1 `Agent` table. A bot is a user. Runtime-specific state remains outside the chat domain.
 
-### Token flow
+## Authentication
 
-1. A workspace member creates an agent identity.
-2. The server generates a high-entropy token and shows it once.
-3. Only a secure hash and non-secret identifier are stored.
-4. The token identifies the workspace and agent during connection authentication.
-5. Hermes opens an outbound secure connection.
-6. The server binds that connection to the existing agent identity and exposes online state.
-7. Tokens can be revoked and rotated.
+### Humans
 
-A token must not grant access beyond the agent’s allowed channels. Avoid encoding durable permissions directly into a long-lived self-contained token if server-side revocation is required.
+- email/password;
+- Argon2id password hashes;
+- opaque server-side sessions;
+- secure HTTP-only SameSite cookies;
+- origin/CSRF checks for cookie-authenticated mutations;
+- bounded in-memory login throttling: five attempts per minute for each normalized email address, independent of source address;
+- a conservative semaphore around Argon2id verification to cap concurrent password-hashing memory use.
 
-### Transport proposal
+Public registration, invitations, password reset, and email delivery are deferred.
 
-Start the spike with WebSocket over TLS because messaging, streaming, presence, and activity are bidirectional. Do not settle the transport until the spike compares reliability, reconnect behaviour, and implementation cost against alternatives such as HTTPS commands plus server-sent events.
+### Bots
 
-Required behaviours:
+1. Michael creates a bot user.
+2. The server generates a high-entropy key with a recognisable prefix.
+3. The raw key is shown once.
+4. Only a lookup identifier and SHA-256 verifier are stored; comparison is constant-time (Argon2id remains exclusive to human passwords).
+5. The key authenticates that bot user through a Bearer header.
+6. Rotation revokes the previous active key; explicit revocation is supported.
 
-- authentication;
-- heartbeat and connection expiry;
-- reconnect with bounded exponential backoff;
-- message acknowledgement;
-- stable event IDs and idempotent retry;
-- protocol version negotiation;
-- server-side channel authorisation;
-- explicit payload and attachment limits.
+Fine-grained scopes are deferred. A key inherits its bot user’s current conversation access.
 
-Exactly-once delivery is not required. Prefer at-least-once delivery with idempotent event handling.
+## Messaging
 
-## Minimal envelope
+- Every message has exactly one user author.
+- Humans and bots use the same create-message path.
+- Messages are persisted before realtime fan-out.
+- Complete messages only; no response deltas or activity events.
+- Bot-authored events are delivered to other bots.
+- The bot runtime decides whether to respond to ordinary messages or mentions.
+- Messages accept bounded Markdown source text.
+- Client-generated idempotency identifiers prevent duplicate sends on retry.
 
-All gateway events can begin with one versioned envelope:
+## Realtime events
+
+A versioned envelope begins with one event type:
 
 ```json
 {
   "version": 1,
-  "id": "evt_01...",
+  "id": "evt_...",
+  "sequence": 42,
   "type": "message.created",
   "occurred_at": "2026-08-14T10:00:00Z",
-  "workspace_id": "ws_01...",
-  "agent_id": "agt_01...",
-  "payload": {}
+  "organisation_id": "org_...",
+  "conversation_id": "conv_...",
+  "data": {
+    "message": {}
+  }
 }
 ```
 
-The exact ID and timestamp formats are implementation choices. The important properties are stable IDs, explicit event types, versioning, and enough scope for authorisation and traceability.
+Events are durable. The server subscribes before replay. A reconnecting client supplies its last fully processed sequence and receives every currently accessible later event. Live hub notifications are wake-up signals only: after any wake, the server queries all authorized durable events beyond the last delivered sequence, so notification coalescing or drops cannot make delivery gaps. Delivery is at least once; clients deduplicate by event/message ID.
 
-## Minimal event set for the spike
+The connection context ends when the peer closes, and every server write has a short deadline. API-key revocation prevents new requests and reconnects but does not forcibly terminate a connection that completed its authentication handshake. Conversation authorization is re-evaluated for each replay batch, so removed access stops subsequent delivery; clients reconnect after any socket close using their last fully processed sequence.
 
-Server to agent:
+Organisation events reach all organisation members. Private-conversation events reach only participants.
 
-- `connection.ready`
-- `message.created`
-- `message.cancel_requested` only if cancellation is tested
+## SQLite operating constraints
 
-Agent to server:
+- exactly one application process;
+- WAL mode;
+- foreign keys enabled;
+- bounded busy timeout;
+- short transactions;
+- application-generated IDs and portable UTC timestamps;
+- tested online backup and restore procedure before production reliance.
 
-- `message.acknowledged`
-- `response.started`
-- `response.delta`
-- `response.completed`
-- `response.failed`
-- `activity.recorded`
+Do not horizontally scale this design. Move to PostgreSQL if concurrent writes, operations, or availability requirements justify it.
 
-Do not create a large taxonomy before the spike exposes a need.
+## Security floor
 
-## Activity event proposal
+- TLS for public traffic;
+- parameterised SQL;
+- passwords and API keys never stored in plaintext;
+- server-side authorisation on every read, write, replay, and WebSocket event;
+- bounded payloads and rates;
+- safe Markdown rendering with no raw HTML or unsafe URL schemes;
+- secrets excluded from logs;
+- revocable bot keys;
+- no runtime/model credentials stored by K-Mainstay.
 
-Activity reports observable work, not hidden reasoning.
+This is a pilot security floor, not an enterprise model.
 
-```json
-{
-  "task_id": "run_01...",
-  "sequence": 4,
-  "phase": "investigating",
-  "status": "running",
-  "summary": "Investigating authentication tests",
-  "detail": "3 authentication tests failed",
-  "category": "test",
-  "result": {
-    "passed": 142,
-    "failed": 3
-  },
-  "requires_approval": false
-}
+## Deployment
+
+```text
+/usr/local/bin/kmainstay
+/etc/kmainstay/kmainstay.env
+/var/lib/kmainstay/kmainstay.db
 ```
 
-### Required fields
+- Vue production assets and migrations are embedded in the Go binary.
+- systemd runs one unprivileged process.
+- Caddy provides automatic HTTPS and WebSocket reverse proxying.
+- Database backups use SQLite’s online backup mechanism rather than copying a live file blindly.
 
-- `task_id`: groups one response or unit of work;
-- `sequence`: provides stable ordering;
-- `status`: `running`, `succeeded`, `failed`, `waiting`, or `cancelled`;
-- `summary`: short user-facing intent, action, result, or next step.
-
-### Optional fields
-
-- `phase`: runtime-defined coarse phase;
-- `detail`: bounded user-facing context;
-- `category`: such as `file`, `command`, `test`, `web`, `git`, or `approval`;
-- `result`: small structured facts safe for display;
-- `requires_approval`: indicates a blocked consequential action;
-- references to files, commands, messages, or artefacts when available.
-
-The server should preserve an append-only event history for the task while allowing the UI to derive a compact current state.
-
-### Never include by default
-
-- chain-of-thought or hidden model reasoning;
-- secrets, credentials, environment values, or full sensitive command output;
-- unbounded logs or file contents;
-- claims of success not backed by runtime evidence.
-
-## Message semantics
-
-- Every message has one author: user or agent.
-- Messages belong to a channel and may reference a parent message.
-- Mentions are structured references, not only parsed display text.
-- Agent-origin messages re-enter normal channel fan-out, allowing authorised agents to receive them.
-- The sender’s own message should not automatically trigger the sender again.
-- Loop prevention and rate limits are required before broad automatic agent listening.
-- Streaming deltas are transient transport events; the completed message is the durable record.
-
-## Attachments
-
-For Phase 1:
-
-- upload through short-lived signed URLs where supported;
-- store metadata in PostgreSQL and bytes in object storage;
-- enforce size and media-type limits;
-- authorise download through workspace/channel membership;
-- do not build a shared filesystem yet.
-
-## Security floor for a pilot
-
-- TLS for hosted traffic;
-- tokens shown once, hashed at rest, revocable, and scoped to one agent;
-- server-side channel checks on every send, receive, and attachment access;
-- rate and payload limits;
-- basic audit records for token creation, connection, revocation, and author actions;
-- no runtime credentials stored in the workspace;
-- redact secrets from activity and logs.
-
-This is not an enterprise security model.
-
-## Questions the spike must answer
-
-1. Can Hermes connect with only a token and one obvious command/config action?
-2. Can reconnect and replay avoid lost or duplicated visible messages?
-3. Which Hermes events can produce useful activity without runtime-specific leakage?
-4. How should one user message map to `task_id`, streamed output, and final message?
-5. Can agent-to-agent delivery avoid loops while remaining natural?
-6. Is WebSocket simpler and more reliable here than split HTTPS/SSE?
-7. What is the minimum connector change that can plausibly be maintained upstream or as a small plugin?
-
-Do not choose a full web framework or deployment platform until these questions have been tested enough to expose their real constraints.
+The VPS, domain, and backup destination are selected only after the local acceptance path passes.

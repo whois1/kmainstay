@@ -1,0 +1,11 @@
+CREATE TABLE organisations (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('human','bot')), email TEXT, name TEXT NOT NULL, password_hash TEXT, created_at TEXT NOT NULL, CHECK((kind='human' AND email IS NOT NULL AND password_hash IS NOT NULL) OR (kind='bot' AND email IS NULL AND password_hash IS NULL)));
+CREATE UNIQUE INDEX users_email_unique ON users(lower(email)) WHERE email IS NOT NULL;
+CREATE TABLE organisation_memberships (organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, PRIMARY KEY(organisation_id,user_id));
+CREATE TABLE conversations (id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE, name TEXT NOT NULL, visibility TEXT NOT NULL CHECK(visibility IN ('organisation','members')), created_at TEXT NOT NULL, UNIQUE(organisation_id,name));
+CREATE TABLE conversation_members (conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY(conversation_id,user_id));
+CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, author_id TEXT NOT NULL REFERENCES users(id), body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 20000), client_id TEXT, created_at TEXT NOT NULL, UNIQUE(conversation_id,author_id,client_id));
+CREATE INDEX messages_order ON messages(conversation_id,created_at,id);
+CREATE TABLE human_sessions (token_hash BLOB PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, lookup TEXT NOT NULL UNIQUE, secret_hash BLOB NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE realtime_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, occurred_at TEXT NOT NULL);

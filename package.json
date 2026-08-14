@@ -1,0 +1,28 @@
+{
+  "name": "kmainstay-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run && node --test examples/reference-bot.test.mjs",
+    "test:watch": "vitest",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0",
+    "vue": "^3.5.18",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.0.5"
+  }
+}
