@@ -7,7 +7,7 @@ Live MVP: <https://170-64-239-198.sslip.io>
 ## Server layout
 
 - application: `/opt/kmainstay/kmainstay`
-- maintenance CLI: `/opt/kmainstay/kmainstayctl`
+- initial setup command: `/opt/kmainstay/kmainstay-initialise`
 - SQLite database: `/var/lib/kmainstay/kmainstay.db`
 - systemd unit: `/etc/systemd/system/kmainstay.service`
 - Caddy config: `/etc/caddy/Caddyfile`

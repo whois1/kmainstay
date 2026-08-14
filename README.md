@@ -56,10 +56,10 @@ Requires Go 1.26+, Node.js 22+, and npm. No Docker is used.
 npm install
 npm run build
 go build -o ./bin/kmainstay ./cmd/kmainstay
-go build -o ./bin/kmainstayctl ./cmd/kmainstayctl
+go build -o ./bin/kmainstay-initialise ./cmd/kmainstay-initialise
 printf '%s\n' 'choose-a-long-password' | DB_PATH=./kmainstay.db \
   BOOTSTRAP_EMAIL=michael@example.com BOOTSTRAP_NAME=Michael \
-  BOOTSTRAP_ORGANISATION=Mainstay ./bin/kmainstayctl bootstrap
+  BOOTSTRAP_ORGANISATION=Mainstay ./bin/kmainstay-initialise
 DB_PATH=./kmainstay.db LISTEN_ADDR=:8080 INSECURE_COOKIES=1 ./bin/kmainstay
 ```
 

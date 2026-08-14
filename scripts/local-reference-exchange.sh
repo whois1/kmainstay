@@ -9,8 +9,8 @@ cleanup() { [[ -z "$bot_pid" ]] || kill "$bot_pid" 2>/dev/null || true; [[ -z "$
 trap cleanup EXIT
 cd "$repo_dir"
 go build -o "$run_dir/kmainstay" ./cmd/kmainstay
-go build -o "$run_dir/kmainstayctl" ./cmd/kmainstayctl
-printf '%s\n' 'correct horse battery staple' | DB_PATH="$run_dir/test.db" BOOTSTRAP_EMAIL=michael@example.com BOOTSTRAP_NAME=Michael BOOTSTRAP_ORGANISATION=Mainstay "$run_dir/kmainstayctl" bootstrap >/dev/null
+go build -o "$run_dir/kmainstay-initialise" ./cmd/kmainstay-initialise
+printf '%s\n' 'correct horse battery staple' | DB_PATH="$run_dir/test.db" BOOTSTRAP_EMAIL=michael@example.com BOOTSTRAP_NAME=Michael BOOTSTRAP_ORGANISATION=Mainstay "$run_dir/kmainstay-initialise" >/dev/null
 DB_PATH="$run_dir/test.db" LISTEN_ADDR="127.0.0.1:${port}" INSECURE_COOKIES=1 "$run_dir/kmainstay" >"$run_dir/server.log" 2>&1 & server_pid=$!
 for _ in {1..50}; do curl -fsS "$base_url/healthz" >/dev/null 2>&1 && break; sleep .1; done
 curl -fsS -c "$run_dir/cookies" -H "Origin: $base_url" -H 'Content-Type: application/json' -d '{"email":"michael@example.com","password":"correct horse battery staple"}' "$base_url/api/session" >/dev/null

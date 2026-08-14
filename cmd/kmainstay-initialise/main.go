@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -13,11 +12,10 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 || os.Args[1] != "bootstrap" {
-		fmt.Fprintln(os.Stderr, "usage: kmainstayctl bootstrap (reads DB_PATH, BOOTSTRAP_EMAIL, BOOTSTRAP_NAME, BOOTSTRAP_ORGANISATION; password from stdin)")
+	if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: kmainstay-initialise (reads DB_PATH, BOOTSTRAP_EMAIL, BOOTSTRAP_NAME, BOOTSTRAP_ORGANISATION; password from stdin)")
 		os.Exit(2)
 	}
-	flag.CommandLine.Parse(nil)
 	db, err := database.Open(os.Getenv("DB_PATH"))
 	if err != nil {
 		fatal(err)
