@@ -39,7 +39,7 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
   "CreateBotRequest":{"type":"object","required":["name"],"properties":{"name":{"type":"string"},"conversation_ids":{"type":"array","items":{"type":"string"}}}},
   "AddOrganisationUserRequest":{"type":"object","required":["user_id"],"properties":{"user_id":{"type":"string"}}},
   "BotCreated":{"allOf":[{"$ref":"#/$defs/User"},{"type":"object","required":["api_key"],"properties":{"api_key":{"type":"string","pattern":"^km_live_"}}}]},
-  "CreateMessageRequest":{"type":"object","required":["body","client_id"],"properties":{"body":{"type":"string","minLength":1,"maxLength":20000},"client_id":{"type":"string","maxLength":200}}},
+  "CreateMessageRequest":{"type":"object","required":["body"],"properties":{"body":{"type":"string","minLength":1,"maxLength":20000},"client_id":{"type":"string","maxLength":200}}},
   "MessageCreatedEvent":{"type":"object","required":["version","type","sequence","payload"],"properties":{"version":{"const":1},"type":{"const":"message.created"},"sequence":{"type":"integer"},"payload":{"$ref":"#/$defs/Message"}}}
 }}
 ```

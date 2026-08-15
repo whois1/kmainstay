@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -435,7 +436,8 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	handler := httpapi.New(httpapi.Dependencies{DB: db})
+	server := httptest.NewServer(handler)
 	defer server.Close()
 	admin := newCookieClient(t)
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "michael@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
@@ -472,11 +474,46 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 		response.Body.Close()
 	}
 
+	slowBody := &delayedJSONBody{started: make(chan struct{}), release: make(chan struct{}), body: []byte(`{"body":"Too late","client_id":"after-removal"}`)}
+	slowRequest := httptest.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", slowBody)
+	slowRequest.Header.Set("Authorization", "Bearer "+bot.APIKey)
+	slowRecorder := httptest.NewRecorder()
+	slowDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(slowRecorder, slowRequest)
+		close(slowDone)
+	}()
+	<-slowBody.started
+	retryBody := &delayedJSONBody{started: make(chan struct{}), release: make(chan struct{}), body: []byte(`{"body":"Retry","client_id":"before-removal"}`)}
+	retryRequest := httptest.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", retryBody)
+	retryRequest.Header.Set("Authorization", "Bearer "+bot.APIKey)
+	retryRecorder := httptest.NewRecorder()
+	retryDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(retryRecorder, retryRequest)
+		close(retryDone)
+	}()
+	<-retryBody.started
+
 	removed := requestJSON(t, admin, http.MethodDelete, endpoint, server.URL, "", nil)
 	if removed.StatusCode != http.StatusNoContent {
 		t.Fatalf("remove status = %d: %s", removed.StatusCode, readBody(removed))
 	}
 	removed.Body.Close()
+	close(slowBody.release)
+	close(retryBody.release)
+	<-slowDone
+	<-retryDone
+	if slowRecorder.Code != http.StatusForbidden {
+		t.Fatalf("in-flight post status = %d: %s", slowRecorder.Code, slowRecorder.Body.String())
+	}
+	if retryRecorder.Code != http.StatusForbidden {
+		t.Fatalf("in-flight retry status = %d: %s", retryRecorder.Code, retryRecorder.Body.String())
+	}
+	var lateMessages int
+	if err := db.QueryRow(`SELECT count(*) FROM messages WHERE client_id='after-removal'`).Scan(&lateMessages); err != nil || lateMessages != 0 {
+		t.Fatalf("messages after removal = %d, err=%v", lateMessages, err)
+	}
 	oldKey := requestJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/organisations", "", bot.APIKey, nil)
 	if oldKey.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("removed key status = %d: %s", oldKey.StatusCode, readBody(oldKey))
@@ -497,6 +534,27 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 		t.Fatalf("preserved author = %q, err=%v", authorName, err)
 	}
 }
+
+type delayedJSONBody struct {
+	started, release chan struct{}
+	body             []byte
+	announced, sent  bool
+}
+
+func (b *delayedJSONBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.EOF
+	}
+	if !b.announced {
+		close(b.started)
+		b.announced = true
+	}
+	<-b.release
+	b.sent = true
+	return copy(p, b.body), nil
+}
+
+func (b *delayedJSONBody) Close() error { return nil }
 
 func TestLogin_NormalisedEmailLimitAndExpiredSessionCleanup(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "login.db"))

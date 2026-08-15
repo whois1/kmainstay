@@ -78,7 +78,7 @@ Human and bot display names share one namespace inside an organisation. Names ar
 
 ### Bots
 
-A bot authenticates with `Authorization: Bearer km_live_…`. The raw key is returned only when created or rotated. The database stores a lookup value and hashed verifier, never the raw key.
+A bot authenticates with `Authorization: Bearer <copy-once API key>`. The raw key is returned only when created or rotated. The database stores a lookup value and hashed verifier, never the raw key.
 
 ### Roles
 
@@ -98,7 +98,7 @@ Adding a human searches for an existing account by exact email and creates a `me
 1. The HTTP authentication middleware resolves a human session or bot key.
 2. The handler confirms the principal can access the target conversation.
 3. Input size, rate, body and idempotency identifier are validated.
-4. A short SQLite transaction inserts the message and a durable realtime event.
+4. A short SQLite transaction rechecks current conversation access while inserting the message, then inserts a durable realtime event. This prevents an in-flight request from publishing after access is removed.
 5. The transaction commits.
 6. The in-process hub publishes only the new sequence as a wake-up signal.
 7. HTTP returns the complete stored message.

@@ -675,6 +675,10 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	m, created, err := s.insertMessage(r.Context(), conversationID, p, in.Body, in.ClientID)
 	if err != nil {
+		if errors.Is(err, errMessageAccessDenied) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 		returnServerError(w)
 		return
 	}
@@ -688,27 +692,52 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, m)
 }
 
+var errMessageAccessDenied = errors.New("message access denied")
+
 func (s *server) insertMessage(ctx context.Context, conversationID string, p principal, body, clientID string) (message, bool, error) {
-	if clientID != "" {
-		if m, err := s.messageByClient(ctx, conversationID, p.ID, clientID); err == nil {
-			return m, false, nil
-		}
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return message{}, false, err
 	}
 	defer tx.Rollback()
 	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText()}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at) VALUES(?,?,?,?,nullif(?,''),?)`, m.ID, conversationID, p.ID, body, clientID, m.CreatedAt); err != nil {
+	result, insertErr := tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at)
+		SELECT ?,c.id,?,?,nullif(?,''),?
+		FROM conversations c
+		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
+		WHERE c.id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, m.ID, p.ID, body, clientID, m.CreatedAt, p.ID, conversationID, p.ID)
+	if insertErr == nil {
+		if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
+			return message{}, false, rowsErr
+		} else if affected != 1 {
+			return message{}, false, errMessageAccessDenied
+		}
+	} else {
 		if clientID != "" {
 			var existing message
-			e := tx.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?`, conversationID, p.ID, clientID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
+			e := tx.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence
+				FROM messages m
+				JOIN users u ON u.id=m.author_id
+				JOIN realtime_events e ON e.message_id=m.id
+				JOIN conversations c ON c.id=m.conversation_id
+				JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
+				WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?
+				AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
 			if e == nil {
 				return existing, false, nil
 			}
+			if !errors.Is(e, sql.ErrNoRows) {
+				return message{}, false, e
+			}
+			var duplicateExists int
+			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE conversation_id=? AND author_id=? AND client_id=?`, conversationID, p.ID, clientID).Scan(&duplicateExists); e != nil {
+				return message{}, false, e
+			}
+			if duplicateExists == 1 {
+				return message{}, false, errMessageAccessDenied
+			}
 		}
-		return message{}, false, err
+		return message{}, false, insertErr
 	}
 	var orgID string
 	if err = tx.QueryRowContext(ctx, `SELECT organisation_id FROM conversations WHERE id=?`, conversationID).Scan(&orgID); err != nil {

@@ -22,7 +22,10 @@ const addUserStep = ref<'' | 'bot' | 'key'>('')
 const botName = ref('')
 const apiKey = ref('')
 const copied = ref(false)
+const keySaved = ref(false)
+const keyError = ref('')
 const keyAction = ref<'created' | 'rotated'>('created')
+const botMutationID = ref('')
 const notice = ref('')
 const removingBotID = ref('')
 const showConversation = ref(false)
@@ -99,7 +102,7 @@ async function createBot() {
   try {
     const bot = await request<User & { api_key: string }>(`/api/organisations/${organisation.value.id}/bots`, jsonInit('POST', { name: botName.value }))
     users.value.push(bot)
-    apiKey.value = bot.api_key; keyAction.value = 'created'; copied.value = false; addUserStep.value = 'key'; botName.value = ''
+    apiKey.value = bot.api_key; keyAction.value = 'created'; copied.value = false; keySaved.value = false; keyError.value = ''; addUserStep.value = 'key'; botName.value = ''
   } catch (cause) { error.value = messageOf(cause) }
 }
 
@@ -142,35 +145,54 @@ async function addExistingUser() {
 }
 
 async function rotateBotKey(bot: User) {
+  if (botMutationID.value || !window.confirm(`Rotate ${bot.name}'s key? Its current key will stop working immediately.`)) return
+  botMutationID.value = bot.id
+  error.value = ''
   try {
     const result = await request<{ api_key: string }>(`/api/bots/${bot.id}/key`, jsonInit('POST'))
     apiKey.value = result.api_key
     keyAction.value = 'rotated'
     copied.value = false
+    keySaved.value = false
+    keyError.value = ''
     addUserStep.value = 'key'
-  } catch (cause) { error.value = messageOf(cause) }
+  } catch (cause) { error.value = messageOf(cause) } finally { botMutationID.value = '' }
 }
 
 async function revokeBotKey(bot: User) {
+  if (botMutationID.value) return
+  botMutationID.value = bot.id
   try {
     await request<void>(`/api/bots/${bot.id}/key`, jsonInit('DELETE'))
     notice.value = `${bot.name} key revoked`
-  } catch (cause) { error.value = messageOf(cause) }
+  } catch (cause) { error.value = messageOf(cause) } finally { botMutationID.value = '' }
 }
 
 async function removeBot(bot: User) {
-  if (!organisation.value) return
+  if (!organisation.value || botMutationID.value) return
+  botMutationID.value = bot.id
   try {
     await request<void>(`/api/organisations/${organisation.value.id}/bots/${bot.id}`, jsonInit('DELETE'))
     users.value = users.value.filter(user => user.id !== bot.id)
     removingBotID.value = ''
     notice.value = `${bot.name} removed`
-  } catch (cause) { error.value = messageOf(cause) }
+  } catch (cause) { error.value = messageOf(cause) } finally { botMutationID.value = '' }
 }
 
 async function copyKey() {
-  await navigator.clipboard.writeText(apiKey.value)
-  copied.value = true
+  try {
+    await navigator.clipboard.writeText(apiKey.value)
+    copied.value = true
+    keyError.value = ''
+  } catch {
+    copied.value = false
+    keyError.value = 'Copy failed. Select the visible key and copy it manually.'
+  }
+}
+
+function closeAddUser() {
+  if (addUserStep.value === 'key' && !keySaved.value) return
+  addUserStep.value = ''
 }
 
 async function openConversationDialog() {
@@ -210,7 +232,7 @@ onBeforeUnmount(realtime.disconnect)
     <aside>
       <div data-testid="organisation-brand" class="brand"><span class="mark">K</span><span class="brand-copy"><strong>{{ organisation?.name }}</strong><small>{{ organisation?.role }}</small></span><button data-testid="organisation-settings" class="brand-settings" :class="{ active: activeView === 'settings' }" aria-label="Organisation settings" title="Organisation settings" @click="openOrganisation"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.4 7.4 0 0 0 0 1.96l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/></svg></button></div>
       <div class="side-heading"><span>Conversations</span><button data-testid="new-conversation" class="icon-button" aria-label="New private conversation" @click="openConversationDialog">＋</button></div>
-      <nav><button v-for="conversation in conversations" :key="conversation.id" :class="{ active: selected?.id === conversation.id }" @click="selectConversation(conversation)"><span>#</span>{{ conversation.name }}<small v-if="conversation.visibility === 'members'">private</small></button></nav>
+      <nav><button v-for="conversation in conversations" :key="conversation.id" :class="{ active: selected?.id === conversation.id }" @click="selectConversation(conversation)"><span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span><small v-if="conversation.visibility === 'members'">private</small></button></nav>
       <div class="profile"><span>{{ me.name.slice(0, 1) }}</span><div><strong>{{ me.name }}</strong><small>Human</small></div></div>
     </aside>
     <section v-if="activeView === 'chat'" class="conversation">
@@ -238,16 +260,16 @@ onBeforeUnmount(realtime.disconnect)
           <div class="settings-list"><article v-for="person in people" :key="person.id" class="settings-row"><div class="member-identity"><span class="member-avatar">{{ person.name.slice(0, 1) }}</span><div><strong>{{ person.name }}</strong><small>Human</small></div></div><span class="role-badge">{{ person.role }}</span></article></div>
           <p class="settings-note">Existing accounts can be added as members. Invitations, role changes and human removal wait for ownership transfer and last-admin rules.</p>
         </section>
-        <section data-testid="bots-section" class="settings-section card"><div class="settings-section-heading"><div><h2>Bots</h2><p>Automated members using copy-once API keys.</p></div><button v-if="organisation?.role === 'admin'" data-testid="add-bot" @click="addUserStep = 'bot'">＋ Add bot</button></div><div v-if="bots.length" class="settings-list"><article v-for="bot in bots" :key="bot.id" class="settings-row bot-row"><div class="member-identity"><span class="member-avatar bot">{{ bot.name.slice(0, 1) }}</span><div><strong>{{ bot.name }}</strong><small>Bot · {{ bot.role }}</small></div></div><div v-if="organisation?.role === 'admin'" class="key-actions"><button :data-testid="`rotate-key-${bot.id}`" class="secondary" @click="rotateBotKey(bot)">Rotate key</button><button :data-testid="`revoke-key-${bot.id}`" class="secondary" @click="revokeBotKey(bot)">Revoke key</button><button :data-testid="`remove-bot-${bot.id}`" class="danger-outline" @click="removingBotID = bot.id">Remove</button></div><div v-if="removingBotID === bot.id" class="removal-confirmation"><p>Remove <strong>{{ bot.name }}</strong>? Its access to this organisation will stop immediately. If it has no other memberships, its keys stop too. Existing messages stay visible.</p><div><button class="secondary" @click="removingBotID = ''">Cancel</button><button :data-testid="`confirm-remove-${bot.id}`" class="danger" @click="removeBot(bot)">Remove {{ bot.name }}</button></div></div></article></div><p v-else class="empty-state">No bots have been added.</p></section>
+        <section data-testid="bots-section" class="settings-section card"><div class="settings-section-heading"><div><h2>Bots</h2><p>Automated members using copy-once API keys.</p></div><button v-if="organisation?.role === 'admin'" data-testid="add-bot" @click="addUserStep = 'bot'">＋ Add bot</button></div><div v-if="bots.length" class="settings-list"><article v-for="bot in bots" :key="bot.id" class="settings-row bot-row"><div class="member-identity"><span class="member-avatar bot">{{ bot.name.slice(0, 1) }}</span><div><strong>{{ bot.name }}</strong><small>Bot · {{ bot.role }}</small></div></div><div v-if="organisation?.role === 'admin'" class="key-actions"><button :data-testid="`rotate-key-${bot.id}`" class="secondary" :disabled="!!botMutationID" @click="rotateBotKey(bot)">Rotate key</button><button :data-testid="`revoke-key-${bot.id}`" class="secondary" :disabled="!!botMutationID" @click="revokeBotKey(bot)">Revoke key</button><button :data-testid="`remove-bot-${bot.id}`" class="danger-outline" :disabled="!!botMutationID" @click="removingBotID = bot.id">Remove</button></div><div v-if="removingBotID === bot.id" class="removal-confirmation"><p>Remove <strong>{{ bot.name }}</strong>? Its access to this organisation will stop immediately. If it has no other memberships, its keys stop too. Existing messages stay visible.</p><div><button class="secondary" :disabled="!!botMutationID" @click="removingBotID = ''">Cancel</button><button :data-testid="`confirm-remove-${bot.id}`" class="danger" :disabled="!!botMutationID" @click="removeBot(bot)">Remove {{ bot.name }}</button></div></div></article></div><p v-else class="empty-state">No bots have been added.</p></section>
       </div>
       <p v-if="error" class="toast error" role="alert">{{ error }}</p>
     </section>
   </main>
 
-  <div v-if="addUserStep" class="scrim" @click.self="addUserStep = ''"><section class="modal card">
-    <button class="close" aria-label="Close" @click="addUserStep = ''">×</button>
+  <div v-if="addUserStep" class="scrim" @click.self="closeAddUser"><section class="modal card">
+    <button class="close" aria-label="Close" :disabled="addUserStep === 'key' && !keySaved" @click="closeAddUser">×</button>
     <form v-if="addUserStep === 'bot'" data-testid="create-bot" @submit.prevent="createBot"><p class="eyebrow">NEW BOT</p><h2>Name your bot</h2><label>Name<input data-testid="bot-name" v-model="botName" autofocus required placeholder="e.g. Hector"></label><button>Create bot</button></form>
-    <template v-else><p class="eyebrow">{{ keyAction === 'created' ? 'BOT CREATED' : 'KEY ROTATED' }}</p><h2>{{ keyAction === 'created' ? 'Copy this key now' : 'Copy the rotated key now' }}</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button></template>
+    <template v-else><p class="eyebrow">{{ keyAction === 'created' ? 'BOT CREATED' : 'KEY ROTATED' }}</p><h2>{{ keyAction === 'created' ? 'Copy this key now' : 'Copy the rotated key now' }}</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button><p v-if="keyError" class="error" role="alert">{{ keyError }}</p><label class="check key-saved-confirmation"><input data-testid="key-saved" v-model="keySaved" type="checkbox"><span>I saved this key securely</span></label></template>
   </section></div>
 
   <div v-if="showConversation" class="scrim" @click.self="showConversation = false"><form class="modal card" data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="showConversation = false">×</button><p class="eyebrow">PRIVATE CONVERSATION</p><h2>Start a conversation</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" required placeholder="e.g. Planning"></label><fieldset><legend>People</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button>Create conversation</button></form></div>

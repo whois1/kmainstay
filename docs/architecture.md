@@ -100,14 +100,18 @@ A versioned envelope begins with one event type:
 ```json
 {
   "version": 1,
-  "id": "evt_...",
-  "sequence": 42,
   "type": "message.created",
-  "occurred_at": "2026-08-14T10:00:00Z",
-  "organisation_id": "org_...",
-  "conversation_id": "conv_...",
-  "data": {
-    "message": {}
+  "sequence": 42,
+  "payload": {
+    "id": "msg_...",
+    "conversation_id": "conv_...",
+    "author_id": "usr_...",
+    "author_name": "Hector",
+    "author_kind": "bot",
+    "body": "Complete message body",
+    "client_id": "optional-idempotency-id",
+    "created_at": "2026-08-14T10:00:00Z",
+    "sequence": 42
   }
 }
 ```

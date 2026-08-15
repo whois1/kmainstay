@@ -54,7 +54,7 @@ describe('K-Mainstay UI', () => {
     fetcher
       .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
       .mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
-    Object.assign(navigator, { clipboard: { writeText: vi.fn() } })
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
@@ -67,6 +67,10 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('km_live_lookup_secret')
     await wrapper.get('[data-testid=copy-key]').trigger('click')
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('km_live_lookup_secret')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Select the visible key and copy it manually')
+    expect(wrapper.get('.modal [role=alert]').text()).toContain('copy it manually')
+    expect(wrapper.get('.modal .close').attributes('disabled')).toBeDefined()
   })
 
   it('creates a private conversation with selected organisation users', async () => {
@@ -178,23 +182,36 @@ describe('K-Mainstay UI', () => {
   it('lets an admin rotate and revoke a bot key', async () => {
     const fetcher = loadedFetcher()
     const roster = [{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]
+    let finishRotation!: (response: Response) => void
+    const rotation = new Promise<Response>(resolve => { finishRotation = resolve })
     fetcher
       .mockImplementationOnce(() => json(roster))
-      .mockImplementationOnce(() => json({ api_key: 'km_live_rotated_secret' }, 201))
+      .mockImplementationOnce(() => rotation)
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     await wrapper.get('[data-testid=rotate-key-b1]').trigger('click')
+    expect(confirm).toHaveBeenCalledWith("Rotate Hector's key? Its current key will stop working immediately.")
+    expect(wrapper.get('[data-testid=rotate-key-b1]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid=revoke-key-b1]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid=rotate-key-b1]').trigger('click')
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/bots/b1/key')).toHaveLength(1)
+    finishRotation(new Response(JSON.stringify({ api_key: 'km_live_rotated_secret' }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
     await flushPromises()
     expect(wrapper.text()).toContain('Copy the rotated key now')
     expect(wrapper.text()).toContain('km_live_rotated_secret')
+    await wrapper.get('.modal .close').trigger('click')
+    expect(wrapper.text()).toContain('Copy the rotated key now')
+    await wrapper.get('[data-testid=key-saved]').setValue(true)
     await wrapper.get('.modal .close').trigger('click')
     await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/bots/b1/key', expect.objectContaining({ method: 'DELETE' }))
     expect(wrapper.text()).toContain('Hector key revoked')
+    confirm.mockRestore()
   })
 
   it('lets an admin confirm bot removal and updates the settings list', async () => {
