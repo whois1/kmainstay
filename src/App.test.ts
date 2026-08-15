@@ -82,7 +82,7 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Planning')
   })
 
-  it('opens the organisation roster with user roles', async () => {
+  it('opens the organisation roster from a dedicated settings button', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([
       { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
@@ -90,7 +90,8 @@ describe('K-Mainstay UI', () => {
     ]))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
-    await wrapper.get('[data-testid=organisation]').trigger('click')
+    expect(wrapper.get('[data-testid=organisation-brand]').element.tagName).toBe('DIV')
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/users', undefined)
     expect(wrapper.get('[data-testid=organisation-users]').text()).toContain('Michaeladmin')
@@ -107,7 +108,7 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
     expect(wrapper.find('[data-testid=add-user]').exists()).toBe(false)
-    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid=rotate-key-b1]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=revoke-key-b1]').exists()).toBe(false)
@@ -123,14 +124,14 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
-    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     await wrapper.get('[data-testid=rotate-key-b1]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('Copy the rotated key now')
     expect(wrapper.text()).toContain('km_live_rotated_secret')
     await wrapper.get('.modal .close').trigger('click')
-    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
     await flushPromises()
