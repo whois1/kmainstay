@@ -427,7 +427,8 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	if strings.TrimSpace(in.Name) == "" {
+	botName := database.CanonicalName(in.Name)
+	if botName == "" {
 		writeError(w, http.StatusBadRequest, "invalid bot name")
 		return
 	}
@@ -444,11 +445,11 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 	}
 	botID := database.NewID("usr")
 	now := nowText()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO users(id,kind,name,created_at) VALUES(?,'bot',?,?)`, botID, strings.TrimSpace(in.Name), now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO users(id,kind,name,created_at) VALUES(?,'bot',?,?)`, botID, botName, now); err != nil {
 		returnServerError(w)
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,'member',?,?)`, r.PathValue("organisation"), botID, database.NormalizeName(in.Name), now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,'member',?,?)`, r.PathValue("organisation"), botID, database.NormalizeName(botName), now); err != nil {
 		if strings.Contains(err.Error(), "organisation_memberships.organisation_id, organisation_memberships.name_normalized") {
 			writeError(w, http.StatusConflict, "user name already exists")
 			return
@@ -489,7 +490,7 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 		returnServerError(w)
 		return
 	}
-	writeJSON(w, 201, map[string]string{"id": botID, "name": strings.TrimSpace(in.Name), "kind": "bot", "role": "member", "api_key": key})
+	writeJSON(w, 201, map[string]string{"id": botID, "name": botName, "kind": "bot", "role": "member", "api_key": key})
 }
 
 func (s *server) removeBot(w http.ResponseWriter, r *http.Request) {

@@ -42,7 +42,7 @@ Local development does not require Caddy. The Go process and Vite development se
 ```text
 Organisation
 User                  kind: human | bot
-OrganisationMembership role: admin | member; unique normalised user name per organisation
+OrganisationMembership role: admin | member; unique trimmed, NFC-canonicalised and lowercased user name per organisation
 Conversation          visibility: organisation | members
 ConversationMember
 Message

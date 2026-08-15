@@ -68,7 +68,7 @@ The Go binary embeds both SQL migrations and the built Vue files. Deployment the
 - **API key**: bot credential with a public lookup and hashed secret verifier.
 - **Realtime event**: durable increasing sequence pointing to a persisted message.
 
-Human and bot display names share one Unicode-normalised namespace inside an organisation. The database enforces uniqueness.
+Human and bot display names share one namespace inside an organisation. Names are trimmed, canonicalised to Unicode NFC, lowercased and then protected by a database uniqueness constraint.
 
 ## Authentication and authorisation
 
@@ -173,7 +173,7 @@ K-Mainstay does not contain model credentials, prompts, tools, memory, or agent 
 
 ## Database and migrations
 
-`internal/database/database.go` opens SQLite with foreign keys, WAL and a busy timeout, then applies embedded numbered migrations in order. Migration 2 adds roles and normalised organisation names. Legacy duplicate names are preserved by deterministic suffixes.
+`internal/database/database.go` opens SQLite with foreign keys, WAL and a busy timeout, then applies embedded numbered migrations in order. Migration 2 adds roles and normalised organisation names. Migration 3 canonicalises names to Unicode NFC. Legacy collisions are preserved by deterministic suffixes.
 
 Production backups must use SQLite's online backup mechanism. Copying only the main file while WAL writes are active is unsafe.
 

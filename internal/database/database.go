@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
 
@@ -17,6 +18,9 @@ var initialMigration string
 
 //go:embed migrations/002_membership_roles.sql
 var membershipRolesMigration string
+
+//go:embed migrations/003_canonical_names.sql
+var canonicalNamesMigration string
 
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
@@ -63,6 +67,20 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 2 memberships: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(2,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=3`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(canonicalNamesMigration); err != nil {
+			return fmt.Errorf("migration 3: %w", err)
+		}
+		if err = migrateCanonicalNames(tx); err != nil {
+			return fmt.Errorf("migration 3 names: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(3,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}
@@ -180,8 +198,141 @@ func migrateMembershipRoles(tx *sql.Tx) error {
 	return err
 }
 
+type canonicalMembership struct {
+	OrganisationID string
+	Role           string
+	CreatedAt      string
+}
+
+type canonicalUser struct {
+	ID          string
+	Name        string
+	Earliest    string
+	Memberships map[string]canonicalMembership
+}
+
+func migrateCanonicalNames(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT m.organisation_id,m.user_id,m.role,u.name,m.created_at
+		FROM organisation_memberships_canonical_legacy m
+		JOIN users u ON u.id=m.user_id
+		ORDER BY m.created_at,m.user_id,m.organisation_id`)
+	if err != nil {
+		return err
+	}
+	users := map[string]*canonicalUser{}
+	for rows.Next() {
+		var organisationID, userID, role, name, createdAt string
+		if err := rows.Scan(&organisationID, &userID, &role, &name, &createdAt); err != nil {
+			rows.Close()
+			return err
+		}
+		user := users[userID]
+		if user == nil {
+			user = &canonicalUser{ID: userID, Name: name, Earliest: createdAt, Memberships: map[string]canonicalMembership{}}
+			users[userID] = user
+		}
+		user.Memberships[organisationID] = canonicalMembership{OrganisationID: organisationID, Role: role, CreatedAt: createdAt}
+		if createdAt < user.Earliest {
+			user.Earliest = createdAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	orderedUsers := make([]*canonicalUser, 0, len(users))
+	for _, user := range users {
+		orderedUsers = append(orderedUsers, user)
+	}
+	sort.Slice(orderedUsers, func(i, j int) bool {
+		if orderedUsers[i].Earliest == orderedUsers[j].Earliest {
+			return orderedUsers[i].ID < orderedUsers[j].ID
+		}
+		return orderedUsers[i].Earliest < orderedUsers[j].Earliest
+	})
+	usedNames := map[string]map[string]bool{}
+	for _, user := range orderedUsers {
+		base := norm.NFC.String(strings.TrimSpace(user.Name))
+		if base == "" {
+			return fmt.Errorf("user %s has an empty name", user.ID)
+		}
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			normalized := NormalizeName(candidate)
+			conflict := false
+			for organisationID := range user.Memberships {
+				if usedNames[organisationID][normalized] {
+					conflict = true
+					break
+				}
+			}
+			if !conflict {
+				break
+			}
+			candidate = fmt.Sprintf("%s %d", base, suffix)
+		}
+		normalized := NormalizeName(candidate)
+		if _, err := tx.Exec(`UPDATE users SET name=? WHERE id=?`, candidate, user.ID); err != nil {
+			return err
+		}
+		organisationIDs := make([]string, 0, len(user.Memberships))
+		for organisationID := range user.Memberships {
+			organisationIDs = append(organisationIDs, organisationID)
+		}
+		sort.Strings(organisationIDs)
+		for _, organisationID := range organisationIDs {
+			if usedNames[organisationID] == nil {
+				usedNames[organisationID] = map[string]bool{}
+			}
+			usedNames[organisationID][normalized] = true
+			membership := user.Memberships[organisationID]
+			if _, err := tx.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,?,?,?)`, organisationID, user.ID, membership.Role, normalized, membership.CreatedAt); err != nil {
+				return err
+			}
+		}
+	}
+	orphanRows, err := tx.Query(`SELECT id,name FROM users
+		WHERE NOT EXISTS(SELECT 1 FROM organisation_memberships WHERE user_id=users.id)
+		ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	type orphanedUser struct{ ID, Name string }
+	var orphanedUsers []orphanedUser
+	for orphanRows.Next() {
+		var user orphanedUser
+		if err := orphanRows.Scan(&user.ID, &user.Name); err != nil {
+			orphanRows.Close()
+			return err
+		}
+		orphanedUsers = append(orphanedUsers, user)
+	}
+	if err := orphanRows.Err(); err != nil {
+		orphanRows.Close()
+		return err
+	}
+	orphanRows.Close()
+	for _, user := range orphanedUsers {
+		name := CanonicalName(user.Name)
+		if name == "" {
+			return fmt.Errorf("user %s has an empty name", user.ID)
+		}
+		if _, err := tx.Exec(`UPDATE users SET name=? WHERE id=?`, name, user.ID); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`DROP TABLE organisation_memberships_canonical_legacy`)
+	return err
+}
+
+func CanonicalName(name string) string {
+	return norm.NFC.String(strings.TrimSpace(name))
+}
+
 func NormalizeName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
+	return strings.ToLower(CanonicalName(name))
 }
 
 func NewID(prefix string) string {

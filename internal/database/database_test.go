@@ -29,6 +29,10 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 			t.Errorf("missing table %s: %v", table, err)
 		}
 	}
+	var version int
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("schema version = %d, err=%v", version, err)
+	}
 }
 
 func TestOpen_ConfiguresSQLiteForConcurrentIntegrity(t *testing.T) {
@@ -90,8 +94,64 @@ func TestOpen_MembershipRolesAndNamesAreOrganisationScoped(t *testing.T) {
 }
 
 func TestNormalizeName_TrimsUnicodeWhitespaceAndLowercasesUnicode(t *testing.T) {
-	if got := database.NormalizeName("\u2003Élodie\u00a0"); got != "élodie" {
+	if got := database.NormalizeName("\u2003E\u0301LODIE\u00a0"); got != "élodie" {
 		t.Fatalf("normalised name = %q", got)
+	}
+}
+
+func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-two.db")
+	old, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	schema := `
+		CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);
+		INSERT INTO schema_migrations(version,applied_at) VALUES(1,'2026-01-01T00:00:00Z'),(2,'2026-01-02T00:00:00Z');
+		CREATE TABLE organisations(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
+		CREATE TABLE users(id TEXT PRIMARY KEY,kind TEXT NOT NULL,email TEXT,name TEXT NOT NULL,password_hash TEXT,created_at TEXT NOT NULL);
+		CREATE TABLE organisation_memberships(organisation_id TEXT NOT NULL REFERENCES organisations(id),user_id TEXT NOT NULL REFERENCES users(id),role TEXT NOT NULL,name_normalized TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(organisation_id,user_id),UNIQUE(organisation_id,name_normalized));
+		INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','` + now + `');
+		INSERT INTO users(id,kind,name,created_at) VALUES('first','bot','Élodie','` + now + `'),('second','bot','ÉLODIE','` + now + `'),('orphan','bot','ÉCHO','` + now + `');
+		INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','first','admin','élodie','` + now + `'),('org','second','member','élodie','` + now + `');`
+	if _, err := old.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatalf("migrate version two: %v", err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("schema version = %d, err=%v", version, err)
+	}
+	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string
+	if err := db.QueryRow(`SELECT u.name,m.name_normalized,m.role,m.created_at FROM users u JOIN organisation_memberships m ON m.user_id=u.id WHERE u.id='first'`).Scan(&first, &firstNormalized, &firstRole, &firstCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT u.name,m.name_normalized,m.role,m.created_at FROM users u JOIN organisation_memberships m ON m.user_id=u.id WHERE u.id='second'`).Scan(&second, &secondNormalized, &secondRole, &secondCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if first != "Élodie" || second != "ÉLODIE 2" || firstNormalized != "élodie" || secondNormalized != "élodie 2" || firstRole != "admin" || secondRole != "member" || firstCreatedAt != now || secondCreatedAt != now {
+		t.Fatalf("migrated memberships = names %q/%q normalized=%q/%q roles=%q/%q created=%q/%q", first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt)
+	}
+	var orphan string
+	if err := db.QueryRow(`SELECT name FROM users WHERE id='orphan'`).Scan(&orphan); err != nil || orphan != "ÉCHO" {
+		t.Fatalf("orphan name = %q, err=%v", orphan, err)
+	}
+	foreignKeys, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreignKeys.Close()
+	if foreignKeys.Next() {
+		t.Fatal("migration left a foreign-key violation")
 	}
 }
 

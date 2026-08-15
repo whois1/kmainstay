@@ -20,7 +20,7 @@ type BootstrapResult struct {
 
 func Bootstrap(ctx context.Context, db *sql.DB, email, name, password, organisation string) (BootstrapResult, error) {
 	var out BootstrapResult
-	email, name, organisation = strings.TrimSpace(strings.ToLower(email)), strings.TrimSpace(name), strings.TrimSpace(organisation)
+	email, name, organisation = strings.TrimSpace(strings.ToLower(email)), database.CanonicalName(name), strings.TrimSpace(organisation)
 	if email == "" || name == "" || organisation == "" {
 		return out, fmt.Errorf("email, name, and organisation are required")
 	}

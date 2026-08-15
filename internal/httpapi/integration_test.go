@@ -342,7 +342,7 @@ func TestAddExistingHuman_ListsEligibleAccountsAndRequiresAdmin(t *testing.T) {
 	for _, account := range []struct{ id, email, name string }{
 		{"usr_member", "member@example.com", "Member"},
 		{"usr_casey", "casey@example.com", "Casey"},
-		{"usr_collision", "collision@example.com", " HECTOR "},
+		{"usr_collision", "collision@example.com", " ÉLODIE "},
 	} {
 		if _, err := db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES(?,'human',?,?,?,?)`, account.id, account.email, account.name, passwordHash, now); err != nil {
 			t.Fatal(err)
@@ -360,9 +360,13 @@ func TestAddExistingHuman_ListsEligibleAccountsAndRequiresAdmin(t *testing.T) {
 	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "member@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
 	var bot struct {
 		ID     string `json:"id"`
+		Name   string `json:"name"`
 		APIKey string `json:"api_key"`
 	}
-	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Élodie"}), http.StatusCreated, &bot)
+	if bot.Name != "Élodie" {
+		t.Fatalf("bot display name = %q", bot.Name)
+	}
 	eligibleEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/eligible-users"
 	caseySearch := eligibleEndpoint + "?email=" + url.QueryEscape("casey@example.com")
 	addEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/users"
