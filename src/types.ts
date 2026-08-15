@@ -7,3 +7,4 @@ export interface Message {
   author_kind: 'human' | 'bot'; body: string; client_id?: string; created_at: string; sequence: number
 }
 export interface User { id: string; kind: 'human' | 'bot'; name: string; role: OrganisationRole }
+export interface EligibleUser { id: string; name: string; email: string }

@@ -324,6 +324,176 @@ func TestOrganisationAdministration_RequiresAdminAndRejectsDuplicateNames(t *tes
 	}
 }
 
+func TestAddExistingHuman_ListsEligibleAccountsAndRequiresAdmin(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "add-existing-human.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "michael@example.com", "Michael", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var passwordHash string
+	if err := db.QueryRow(`SELECT password_hash FROM users WHERE id=?`, boot.UserID).Scan(&passwordHash); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, account := range []struct{ id, email, name string }{
+		{"usr_member", "member@example.com", "Member"},
+		{"usr_casey", "casey@example.com", "Casey"},
+		{"usr_collision", "collision@example.com", " HECTOR "},
+	} {
+		if _, err := db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES(?,'human',?,?,?,?)`, account.id, account.email, account.name, passwordHash, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_member','member','member',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	admin := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "michael@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	member := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "member@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot struct {
+		ID     string `json:"id"`
+		APIKey string `json:"api_key"`
+	}
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	eligibleEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/eligible-users"
+	caseySearch := eligibleEndpoint + "?email=" + url.QueryEscape("casey@example.com")
+	addEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/users"
+
+	for name, response := range map[string]*http.Response{
+		"member searches eligible users": requestJSON(t, member, http.MethodGet, caseySearch, "", "", nil),
+		"bot searches eligible users":    requestJSON(t, http.DefaultClient, http.MethodGet, caseySearch, "", bot.APIKey, nil),
+		"member adds a user":             requestJSON(t, member, http.MethodPost, addEndpoint, server.URL, "", map[string]any{"user_id": "usr_casey"}),
+	} {
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s status = %d: %s", name, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+
+	missingEmail := requestJSON(t, admin, http.MethodGet, eligibleEndpoint, "", "", nil)
+	if missingEmail.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing email status = %d: %s", missingEmail.StatusCode, readBody(missingEmail))
+	}
+	missingEmail.Body.Close()
+	var eligible []map[string]any
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, caseySearch, "", "", nil), http.StatusOK, &eligible)
+	if len(eligible) != 1 || eligible[0]["id"] != "usr_casey" {
+		t.Fatalf("eligible = %#v, want only Casey; conflicting names must be excluded", eligible)
+	}
+	for _, account := range eligible {
+		if len(account) != 3 || account["id"] == nil || account["name"] == nil || account["email"] == nil {
+			t.Fatalf("eligible account exposes wrong fields: %#v", account)
+		}
+		if account["password_hash"] != nil {
+			t.Fatalf("eligible account exposed password hash: %#v", account)
+		}
+	}
+	var conflicting []map[string]any
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, eligibleEndpoint+"?email="+url.QueryEscape("collision@example.com"), "", "", nil), http.StatusOK, &conflicting)
+	if len(conflicting) != 0 {
+		t.Fatalf("conflicting account was offered: %#v", conflicting)
+	}
+
+	var added struct {
+		ID   string `json:"id"`
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+		Role string `json:"role"`
+	}
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, addEndpoint, server.URL, "", map[string]any{"user_id": "usr_casey"}), http.StatusCreated, &added)
+	if added.ID != "usr_casey" || added.Kind != "human" || added.Name != "Casey" || added.Role != "member" {
+		t.Fatalf("added user = %#v", added)
+	}
+	for name, userID := range map[string]string{"duplicate membership": "usr_casey", "normalised name collision": "usr_collision"} {
+		response := requestJSON(t, admin, http.MethodPost, addEndpoint, server.URL, "", map[string]any{"user_id": userID})
+		if response.StatusCode != http.StatusConflict {
+			t.Fatalf("%s status = %d: %s", name, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+}
+
+func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "remove-bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "michael@example.com", "Michael", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	admin := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "michael@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot struct {
+		ID     string `json:"id"`
+		APIKey string `json:"api_key"`
+	}
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	decodeResponse(t, requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", bot.APIKey, map[string]any{"body": "Keep this attribution", "client_id": "before-removal"}), http.StatusCreated, &map[string]any{})
+	var privateConversation map[string]string
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "private", "visibility": "members", "member_ids": []string{bot.ID}}), http.StatusCreated, &privateConversation)
+
+	var passwordHash string
+	if err := db.QueryRow(`SELECT password_hash FROM users WHERE id=?`, boot.UserID).Scan(&passwordHash); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('usr_member','human','member@example.com','Member',?,?)`, passwordHash, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_member','member','member',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	member := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "member@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/bots/" + bot.ID
+	for action, response := range map[string]*http.Response{
+		"member removes bot": requestJSON(t, member, http.MethodDelete, endpoint, server.URL, "", nil),
+		"bot removes itself": requestJSON(t, http.DefaultClient, http.MethodDelete, endpoint, "", bot.APIKey, nil),
+	} {
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s status = %d: %s", action, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+
+	removed := requestJSON(t, admin, http.MethodDelete, endpoint, server.URL, "", nil)
+	if removed.StatusCode != http.StatusNoContent {
+		t.Fatalf("remove status = %d: %s", removed.StatusCode, readBody(removed))
+	}
+	removed.Body.Close()
+	oldKey := requestJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/organisations", "", bot.APIKey, nil)
+	if oldKey.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("removed key status = %d: %s", oldKey.StatusCode, readBody(oldKey))
+	}
+	oldKey.Body.Close()
+	for label, query := range map[string]string{
+		"memberships":         `SELECT count(*) FROM organisation_memberships WHERE user_id=?`,
+		"api keys":            `SELECT count(*) FROM api_keys WHERE user_id=?`,
+		"conversation access": `SELECT count(*) FROM conversation_members WHERE user_id=?`,
+	} {
+		var count int
+		if err := db.QueryRow(query, bot.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s = %d, err=%v", label, count, err)
+		}
+	}
+	var authorName string
+	if err := db.QueryRow(`SELECT u.name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.client_id='before-removal'`).Scan(&authorName); err != nil || authorName != "Hector" {
+		t.Fatalf("preserved author = %q, err=%v", authorName, err)
+	}
+}
+
 func TestLogin_NormalisedEmailLimitAndExpiredSessionCleanup(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "login.db"))
 	if err != nil {

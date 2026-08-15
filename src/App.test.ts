@@ -51,12 +51,15 @@ describe('K-Mainstay UI', () => {
 
   it('creates a bot and presents its API key once with copy warning', async () => {
     const fetcher = loadedFetcher()
-    fetcher.mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
+    fetcher
+      .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
+      .mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
     Object.assign(navigator, { clipboard: { writeText: vi.fn() } })
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
-    await wrapper.get('[data-testid=add-user]').trigger('click')
-    await wrapper.get('[data-testid=choose-bot]').trigger('click')
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=add-bot]').trigger('click')
     await wrapper.get('[data-testid=bot-name]').setValue('Hector')
     await wrapper.get('[data-testid=create-bot]').trigger('submit')
     await flushPromises()
@@ -82,7 +85,7 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Planning')
   })
 
-  it('opens the organisation roster from a dedicated settings button', async () => {
+  it('opens a full settings page with separate people and bot sections', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([
       { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
@@ -94,8 +97,64 @@ describe('K-Mainstay UI', () => {
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/users', undefined)
-    expect(wrapper.get('[data-testid=organisation-users]').text()).toContain('Michaeladmin')
-    expect(wrapper.get('[data-testid=organisation-users]').text()).toContain('HectormemberBOT')
+    expect(wrapper.find('[data-testid=settings-page]').exists()).toBe(true)
+    expect(wrapper.find('.scrim .organisation-modal').exists()).toBe(false)
+    expect(wrapper.get('[data-testid=people-section]').text()).toContain('Michael')
+    expect(wrapper.get('[data-testid=people-section]').text()).toContain('admin')
+    expect(wrapper.get('[data-testid=bots-section]').text()).toContain('Hector')
+    expect(wrapper.get('[data-testid=bots-section]').text()).toContain('member')
+    expect(wrapper.get('[data-testid=add-existing-user]').text()).toContain('Add existing user')
+    await wrapper.get('[data-testid=back-to-chat]').trigger('click')
+    expect(wrapper.find('[data-testid=composer]').exists()).toBe(true)
+  })
+
+  it('lets an admin add an existing human as a member', async () => {
+    const fetcher = loadedFetcher()
+    fetcher
+      .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
+      .mockImplementationOnce(() => json([{ id: 'u3', name: 'Casey', email: 'casey@example.com' }]))
+      .mockImplementationOnce(() => json({ id: 'u3', kind: 'human', name: 'Casey', role: 'member' }, 201))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=add-existing-user]').trigger('click')
+    await wrapper.get('[data-testid=existing-email]').setValue('casey@example.com')
+    await wrapper.get('[data-testid=search-existing-user-form]').trigger('submit')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/eligible-users?email=casey%40example.com', undefined)
+    await wrapper.get('[data-testid=add-existing-user-u3]').trigger('click')
+    await flushPromises()
+    expect(fetcher).toHaveBeenLastCalledWith('/api/organisations/o1/users', expect.objectContaining({ method: 'POST', body: JSON.stringify({ user_id: 'u3' }) }))
+    expect(wrapper.get('[data-testid=people-section]').text()).toContain('Casey')
+    expect(wrapper.text()).toContain('Casey added as a member')
+    expect(wrapper.find('[data-testid=add-existing-user-u3]').exists()).toBe(false)
+  })
+
+  it('shows a settings load failure instead of silently doing nothing', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json({ error: 'Roster unavailable' }, 500))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid=settings-page]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Roster unavailable')
+  })
+
+  it('returns to chat when a conversation is selected from settings', async () => {
+    const fetcher = loadedFetcher()
+    fetcher
+      .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
+      .mockImplementationOnce(() => json([]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+    await wrapper.get('nav button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid=settings-page]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=composer]').exists()).toBe(true)
   })
 
   it('hides organisation administration controls from members', async () => {
@@ -107,11 +166,13 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
-    expect(wrapper.find('[data-testid=add-user]').exists()).toBe(false)
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
+    expect(wrapper.find('[data-testid=add-bot]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=add-existing-user]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=rotate-key-b1]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=revoke-key-b1]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=remove-bot-b1]').exists()).toBe(false)
   })
 
   it('lets an admin rotate and revoke a bot key', async () => {
@@ -120,7 +181,6 @@ describe('K-Mainstay UI', () => {
     fetcher
       .mockImplementationOnce(() => json(roster))
       .mockImplementationOnce(() => json({ api_key: 'km_live_rotated_secret' }, 201))
-      .mockImplementationOnce(() => json(roster))
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
@@ -131,12 +191,31 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Copy the rotated key now')
     expect(wrapper.text()).toContain('km_live_rotated_secret')
     await wrapper.get('.modal .close').trigger('click')
-    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
-    await flushPromises()
     await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/bots/b1/key', expect.objectContaining({ method: 'DELETE' }))
     expect(wrapper.text()).toContain('Hector key revoked')
+  })
+
+  it('lets an admin confirm bot removal and updates the settings list', async () => {
+    const fetcher = loadedFetcher()
+    fetcher
+      .mockImplementationOnce(() => json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ]))
+      .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=remove-bot-b1]').trigger('click')
+    expect(wrapper.get('[data-testid=confirm-remove-b1]').text()).toContain('Remove Hector')
+    await wrapper.get('[data-testid=confirm-remove-b1]').trigger('click')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/bots/b1', expect.objectContaining({ method: 'DELETE' }))
+    expect(wrapper.get('[data-testid=bots-section]').text()).not.toContain('Hector')
+    expect(wrapper.text()).toContain('Hector removed')
   })
 })
 

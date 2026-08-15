@@ -2,7 +2,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRealtime } from './composables/realtime'
 import { renderMarkdown } from './markdown'
-import type { Conversation, Message, Organisation, Principal, User } from './types'
+import type { Conversation, EligibleUser, Message, Organisation, Principal, User } from './types'
 
 type Fetcher = typeof fetch
 const fetcher = inject<Fetcher>('fetcher', fetch)
@@ -17,17 +17,24 @@ const password = ref('')
 const composer = ref('')
 const error = ref('')
 const busy = ref(false)
-const addUserStep = ref<'' | 'kind' | 'bot' | 'key'>('')
+const activeView = ref<'chat' | 'settings'>('chat')
+const addUserStep = ref<'' | 'bot' | 'key'>('')
 const botName = ref('')
 const apiKey = ref('')
 const copied = ref(false)
 const keyAction = ref<'created' | 'rotated'>('created')
-const showOrganisation = ref(false)
 const notice = ref('')
+const removingBotID = ref('')
 const showConversation = ref(false)
 const conversationName = ref('')
 const users = ref<User[]>([])
+const eligibleUsers = ref<EligibleUser[]>([])
+const eligibleEmail = ref('')
+const selectedEligibleUserID = ref('')
+const showAddExisting = ref(false)
 const memberIDs = ref<string[]>([])
+const people = computed(() => users.value.filter(user => user.kind === 'human'))
+const bots = computed(() => users.value.filter(user => user.kind === 'bot'))
 
 const realtime = useRealtime((message) => {
   if (message.conversation_id === selected.value?.id && !messages.value.some(({ id }) => id === message.id)) {
@@ -74,6 +81,7 @@ async function selectConversation(conversation: Conversation) {
   selected.value = conversation
   messages.value = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
   realtime.seed(messages.value)
+  activeView.value = 'chat'
 }
 
 async function sendMessage() {
@@ -90,15 +98,47 @@ async function createBot() {
   if (!organisation.value || !botName.value.trim()) return
   try {
     const bot = await request<User & { api_key: string }>(`/api/organisations/${organisation.value.id}/bots`, jsonInit('POST', { name: botName.value }))
-    apiKey.value = bot.api_key; keyAction.value = 'created'; copied.value = false; addUserStep.value = 'key'
+    users.value.push(bot)
+    apiKey.value = bot.api_key; keyAction.value = 'created'; copied.value = false; addUserStep.value = 'key'; botName.value = ''
   } catch (cause) { error.value = messageOf(cause) }
 }
 
 async function openOrganisation() {
   if (!organisation.value) return
-  users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`)
+  error.value = ''
+  try {
+    users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`)
+    eligibleUsers.value = []
+    eligibleEmail.value = ''
+    notice.value = ''
+    removingBotID.value = ''
+    showAddExisting.value = false
+    activeView.value = 'settings'
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function searchExistingUser() {
+  if (!organisation.value || !eligibleEmail.value.trim()) return
+  error.value = ''
   notice.value = ''
-  showOrganisation.value = true
+  try {
+    eligibleUsers.value = await request<EligibleUser[]>(`/api/organisations/${organisation.value.id}/eligible-users?email=${encodeURIComponent(eligibleEmail.value.trim())}`)
+    selectedEligibleUserID.value = eligibleUsers.value[0]?.id ?? ''
+    if (!eligibleUsers.value.length) notice.value = 'No eligible user found with that email'
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function addExistingUser() {
+  if (!organisation.value || !selectedEligibleUserID.value) return
+  try {
+    const user = await request<User>(`/api/organisations/${organisation.value.id}/users`, jsonInit('POST', { user_id: selectedEligibleUserID.value }))
+    users.value.push(user)
+    eligibleUsers.value = eligibleUsers.value.filter(candidate => candidate.id !== user.id)
+    selectedEligibleUserID.value = ''
+    eligibleEmail.value = ''
+    showAddExisting.value = false
+    notice.value = `${user.name} added as a member`
+  } catch (cause) { error.value = messageOf(cause) }
 }
 
 async function rotateBotKey(bot: User) {
@@ -107,7 +147,6 @@ async function rotateBotKey(bot: User) {
     apiKey.value = result.api_key
     keyAction.value = 'rotated'
     copied.value = false
-    showOrganisation.value = false
     addUserStep.value = 'key'
   } catch (cause) { error.value = messageOf(cause) }
 }
@@ -116,6 +155,16 @@ async function revokeBotKey(bot: User) {
   try {
     await request<void>(`/api/bots/${bot.id}/key`, jsonInit('DELETE'))
     notice.value = `${bot.name} key revoked`
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function removeBot(bot: User) {
+  if (!organisation.value) return
+  try {
+    await request<void>(`/api/organisations/${organisation.value.id}/bots/${bot.id}`, jsonInit('DELETE'))
+    users.value = users.value.filter(user => user.id !== bot.id)
+    removingBotID.value = ''
+    notice.value = `${bot.name} removed`
   } catch (cause) { error.value = messageOf(cause) }
 }
 
@@ -159,13 +208,12 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <aside>
-      <div data-testid="organisation-brand" class="brand"><span class="mark">K</span><span class="brand-copy"><strong>{{ organisation?.name }}</strong><small>{{ organisation?.role }}</small></span><button data-testid="organisation-settings" class="brand-settings" aria-label="Organisation settings" title="Organisation settings" @click="openOrganisation"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.4 7.4 0 0 0 0 1.96l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/></svg></button></div>
+      <div data-testid="organisation-brand" class="brand"><span class="mark">K</span><span class="brand-copy"><strong>{{ organisation?.name }}</strong><small>{{ organisation?.role }}</small></span><button data-testid="organisation-settings" class="brand-settings" :class="{ active: activeView === 'settings' }" aria-label="Organisation settings" title="Organisation settings" @click="openOrganisation"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.4 7.4 0 0 0 0 1.96l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .6.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.42l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1a.5.5 0 0 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/></svg></button></div>
       <div class="side-heading"><span>Conversations</span><button data-testid="new-conversation" class="icon-button" aria-label="New private conversation" @click="openConversationDialog">＋</button></div>
       <nav><button v-for="conversation in conversations" :key="conversation.id" :class="{ active: selected?.id === conversation.id }" @click="selectConversation(conversation)"><span>#</span>{{ conversation.name }}<small v-if="conversation.visibility === 'members'">private</small></button></nav>
-      <button v-if="organisation?.role === 'admin'" data-testid="add-user" class="add-user" @click="addUserStep = 'kind'">＋ Add user</button>
       <div class="profile"><span>{{ me.name.slice(0, 1) }}</span><div><strong>{{ me.name }}</strong><small>Human</small></div></div>
     </aside>
-    <section class="conversation">
+    <section v-if="activeView === 'chat'" class="conversation">
       <header><div><h1># {{ title }}</h1><p>{{ selected?.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div></header>
       <div class="message-list" aria-live="polite">
         <article v-for="message in messages" :key="message.id" data-testid="message">
@@ -176,16 +224,31 @@ onBeforeUnmount(realtime.disconnect)
       <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="sendMessage"><textarea v-model="composer" :placeholder="`Message #${selected.name}`" rows="1" @keydown.enter.exact.prevent="sendMessage" /><button :disabled="busy || !composer.trim()" aria-label="Send message">↑</button><small>Markdown supported · Enter to send</small></form>
       <p v-if="error" class="toast error" role="alert">{{ error }}</p>
     </section>
+    <section v-else data-testid="settings-page" class="settings-page">
+      <header class="settings-header"><button data-testid="back-to-chat" class="back-button" @click="activeView = 'chat'">← Back to chat</button><div><p class="eyebrow">ORGANISATION SETTINGS</p><h1>{{ organisation?.name }}</h1><p>Manage who belongs here and how bots authenticate.</p></div></header>
+      <div class="settings-content">
+        <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+        <section data-testid="people-section" class="settings-section card">
+          <div class="settings-section-heading"><div><h2>People</h2><p>Existing human members and their organisation roles.</p></div><button v-if="organisation?.role === 'admin'" data-testid="add-existing-user" class="secondary" @click="showAddExisting = !showAddExisting">＋ Add existing user</button></div>
+          <form v-if="showAddExisting" data-testid="search-existing-user-form" class="existing-user-form" @submit.prevent="searchExistingUser">
+            <label>Email address<input data-testid="existing-email" v-model="eligibleEmail" type="email" required placeholder="person@example.com"></label>
+            <button :disabled="!eligibleEmail.trim()">Search</button>
+          </form>
+          <article v-for="candidate in eligibleUsers" :key="candidate.id" class="settings-row existing-user-result"><div class="member-identity"><span class="member-avatar">{{ candidate.name.slice(0, 1) }}</span><div><strong>{{ candidate.name }}</strong><small>{{ candidate.email }}</small></div></div><button :data-testid="`add-existing-user-${candidate.id}`" @click="addExistingUser">Add member</button></article>
+          <div class="settings-list"><article v-for="person in people" :key="person.id" class="settings-row"><div class="member-identity"><span class="member-avatar">{{ person.name.slice(0, 1) }}</span><div><strong>{{ person.name }}</strong><small>Human</small></div></div><span class="role-badge">{{ person.role }}</span></article></div>
+          <p class="settings-note">Existing accounts can be added as members. Invitations, role changes and human removal wait for ownership transfer and last-admin rules.</p>
+        </section>
+        <section data-testid="bots-section" class="settings-section card"><div class="settings-section-heading"><div><h2>Bots</h2><p>Automated members using copy-once API keys.</p></div><button v-if="organisation?.role === 'admin'" data-testid="add-bot" @click="addUserStep = 'bot'">＋ Add bot</button></div><div v-if="bots.length" class="settings-list"><article v-for="bot in bots" :key="bot.id" class="settings-row bot-row"><div class="member-identity"><span class="member-avatar bot">{{ bot.name.slice(0, 1) }}</span><div><strong>{{ bot.name }}</strong><small>Bot · {{ bot.role }}</small></div></div><div v-if="organisation?.role === 'admin'" class="key-actions"><button :data-testid="`rotate-key-${bot.id}`" class="secondary" @click="rotateBotKey(bot)">Rotate key</button><button :data-testid="`revoke-key-${bot.id}`" class="secondary" @click="revokeBotKey(bot)">Revoke key</button><button :data-testid="`remove-bot-${bot.id}`" class="danger-outline" @click="removingBotID = bot.id">Remove</button></div><div v-if="removingBotID === bot.id" class="removal-confirmation"><p>Remove <strong>{{ bot.name }}</strong>? Its access to this organisation will stop immediately. If it has no other memberships, its keys stop too. Existing messages stay visible.</p><div><button class="secondary" @click="removingBotID = ''">Cancel</button><button :data-testid="`confirm-remove-${bot.id}`" class="danger" @click="removeBot(bot)">Remove {{ bot.name }}</button></div></div></article></div><p v-else class="empty-state">No bots have been added.</p></section>
+      </div>
+      <p v-if="error" class="toast error" role="alert">{{ error }}</p>
+    </section>
   </main>
 
   <div v-if="addUserStep" class="scrim" @click.self="addUserStep = ''"><section class="modal card">
     <button class="close" aria-label="Close" @click="addUserStep = ''">×</button>
-    <template v-if="addUserStep === 'kind'"><p class="eyebrow">ADD USER</p><h2>Who are you adding?</h2><button data-testid="choose-bot" class="choice" @click="addUserStep = 'bot'"><strong>Bot</strong><span>An automated teammate using an API key</span></button></template>
-    <form v-else-if="addUserStep === 'bot'" data-testid="create-bot" @submit.prevent="createBot"><p class="eyebrow">NEW BOT</p><h2>Name your bot</h2><label>Name<input data-testid="bot-name" v-model="botName" autofocus required placeholder="e.g. Hector"></label><button>Create bot</button></form>
+    <form v-if="addUserStep === 'bot'" data-testid="create-bot" @submit.prevent="createBot"><p class="eyebrow">NEW BOT</p><h2>Name your bot</h2><label>Name<input data-testid="bot-name" v-model="botName" autofocus required placeholder="e.g. Hector"></label><button>Create bot</button></form>
     <template v-else><p class="eyebrow">{{ keyAction === 'created' ? 'BOT CREATED' : 'KEY ROTATED' }}</p><h2>{{ keyAction === 'created' ? 'Copy this key now' : 'Copy the rotated key now' }}</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button></template>
   </section></div>
-
-  <div v-if="showOrganisation" class="scrim" @click.self="showOrganisation = false"><section class="modal card organisation-modal"><button class="close" aria-label="Close" @click="showOrganisation = false">×</button><p class="eyebrow">ORGANISATION</p><h2>{{ organisation?.name }}</h2><p class="muted">People and bots in this organisation.</p><p v-if="notice" class="notice" role="status">{{ notice }}</p><div data-testid="organisation-users" class="organisation-users"><article v-for="user in users" :key="user.id" class="organisation-user"><div><strong>{{ user.name }}</strong><span class="role-badge">{{ user.role }}</span><span v-if="user.kind === 'bot'" class="bot-badge">BOT</span></div><div v-if="organisation?.role === 'admin' && user.kind === 'bot'" class="key-actions"><button :data-testid="`rotate-key-${user.id}`" class="secondary" @click="rotateBotKey(user)">Rotate key</button><button :data-testid="`revoke-key-${user.id}`" class="danger" @click="revokeBotKey(user)">Revoke key</button></div></article></div></section></div>
 
   <div v-if="showConversation" class="scrim" @click.self="showConversation = false"><form class="modal card" data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="showConversation = false">×</button><p class="eyebrow">PRIVATE CONVERSATION</p><h2>Start a conversation</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" required placeholder="e.g. Planning"></label><fieldset><legend>People</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button>Create conversation</button></form></div>
 </template>

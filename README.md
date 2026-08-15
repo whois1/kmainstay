@@ -35,6 +35,9 @@ An ORM or generated query layer can be added behind the database package later i
 - [Product vision](docs/product-vision.md)
 - [Lean MVP](docs/mvp.md)
 - [MVP architecture](docs/architecture.md)
+- [Newcomer guide](docs/newcomer-guide.md)
+- [Architecture diagram](docs/architecture-diagram.html)
+- [User-flow diagram](docs/user-flow-diagram.html)
 
 ## Current milestone
 
@@ -65,7 +68,7 @@ DB_PATH=./kmainstay.db LISTEN_ADDR=:8080 INSECURE_COOKIES=1 ./bin/kmainstay
 
 Open <http://localhost:8080>. `INSECURE_COOKIES=1` is for local HTTP only; omit it behind HTTPS. For frontend development, run `npm run dev`; Vite proxies API and WebSocket requests to port 8080.
 
-After **Add user → Bot**, copy the one-time key and run:
+From **Organisation settings → Bots → Add bot**, copy the one-time key and run:
 
 ```sh
 KMAINSTAY_URL=http://localhost:8080 KMAINSTAY_API_KEY=km_live_replace_me \

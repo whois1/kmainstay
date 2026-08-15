@@ -64,7 +64,10 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("GET /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.conversations)))
 		mux.Handle("POST /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.createConversation)))
 		mux.Handle("GET /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.users)))
+		mux.Handle("POST /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.addOrganisationUser)))
+		mux.Handle("GET /api/organisations/{organisation}/eligible-users", s.withAuth(http.HandlerFunc(s.eligibleOrganisationUsers)))
 		mux.Handle("POST /api/organisations/{organisation}/bots", s.withAuth(http.HandlerFunc(s.createBot)))
+		mux.Handle("DELETE /api/organisations/{organisation}/bots/{bot}", s.withAuth(http.HandlerFunc(s.removeBot)))
 		mux.Handle("POST /api/bots/{bot}/key", s.withAuth(http.HandlerFunc(s.rotateBotKey)))
 		mux.Handle("DELETE /api/bots/{bot}/key", s.withAuth(http.HandlerFunc(s.revokeBotKey)))
 		mux.Handle("GET /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.messages)))
@@ -289,6 +292,129 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "name": in.Name, "visibility": in.Visibility})
 }
 
+func (s *server) eligibleOrganisationUsers(w http.ResponseWriter, r *http.Request) {
+	organisationID := r.PathValue("organisation")
+	if current(r).Kind != "human" || s.organisationRole(r.Context(), organisationID, current(r).ID) != "admin" {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	email := strings.TrimSpace(r.URL.Query().Get("email"))
+	if email == "" {
+		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+	nameRows, err := s.db.QueryContext(r.Context(), `SELECT name_normalized FROM organisation_memberships WHERE organisation_id=?`, organisationID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	usedNames := map[string]bool{}
+	for nameRows.Next() {
+		var name string
+		if err := nameRows.Scan(&name); err != nil {
+			nameRows.Close()
+			returnServerError(w)
+			return
+		}
+		usedNames[name] = true
+	}
+	if err := nameRows.Err(); err != nil {
+		nameRows.Close()
+		returnServerError(w)
+		return
+	}
+	nameRows.Close()
+	rows, err := s.db.QueryContext(r.Context(), `SELECT u.id,u.name,u.email
+		FROM users u
+		WHERE u.kind='human'
+		AND lower(u.email)=lower(?)
+		AND NOT EXISTS(SELECT 1 FROM organisation_memberships om WHERE om.organisation_id=? AND om.user_id=u.id)
+		ORDER BY u.name,u.id`, email, organisationID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	defer rows.Close()
+	users := make([]map[string]string, 0)
+	for rows.Next() {
+		var id, name, email string
+		if err := rows.Scan(&id, &name, &email); err != nil {
+			returnServerError(w)
+			return
+		}
+		if usedNames[database.NormalizeName(name)] {
+			continue
+		}
+		users = append(users, map[string]string{"id": id, "name": name, "email": email})
+	}
+	if err := rows.Err(); err != nil {
+		returnServerError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s *server) addOrganisationUser(w http.ResponseWriter, r *http.Request) {
+	if current(r).Kind != "human" {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	var in struct {
+		UserID string `json:"user_id"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	in.UserID = strings.TrimSpace(in.UserID)
+	if in.UserID == "" {
+		writeError(w, http.StatusBadRequest, "user is required")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	defer tx.Rollback()
+	organisationID := r.PathValue("organisation")
+	var allowed int
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM organisation_memberships WHERE organisation_id=? AND user_id=? AND role='admin'`, organisationID, current(r).ID).Scan(&allowed); err != nil {
+		returnServerError(w)
+		return
+	}
+	if allowed != 1 {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	var name string
+	if err = tx.QueryRowContext(r.Context(), `SELECT name FROM users WHERE id=? AND kind='human'`, in.UserID).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "human user not found")
+			return
+		}
+		returnServerError(w)
+		return
+	}
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,'member',?,?)`, organisationID, in.UserID, database.NormalizeName(name), nowText())
+	if err != nil {
+		if strings.Contains(err.Error(), "organisation_memberships.organisation_id, organisation_memberships.user_id") {
+			writeError(w, http.StatusConflict, "user already belongs to organisation")
+			return
+		}
+		if strings.Contains(err.Error(), "organisation_memberships.organisation_id, organisation_memberships.name_normalized") {
+			writeError(w, http.StatusConflict, "user name already exists")
+			return
+		}
+		returnServerError(w)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		returnServerError(w)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": in.UserID, "kind": "human", "name": name, "role": "member"})
+}
+
 func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 	if current(r).Kind != "human" || s.organisationRole(r.Context(), r.PathValue("organisation"), current(r).ID) != "admin" {
 		writeError(w, 403, "access denied")
@@ -364,6 +490,63 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]string{"id": botID, "name": strings.TrimSpace(in.Name), "kind": "bot", "role": "member", "api_key": key})
+}
+
+func (s *server) removeBot(w http.ResponseWriter, r *http.Request) {
+	if current(r).Kind != "human" {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	defer tx.Rollback()
+	organisationID := r.PathValue("organisation")
+	botID := r.PathValue("bot")
+	var allowed int
+	err = tx.QueryRowContext(r.Context(), `SELECT count(*)
+		FROM organisation_memberships target
+		JOIN users bot ON bot.id=target.user_id AND bot.kind='bot'
+		JOIN organisation_memberships administrator ON administrator.organisation_id=target.organisation_id AND administrator.user_id=? AND administrator.role='admin'
+		WHERE target.organisation_id=? AND target.user_id=?`, current(r).ID, organisationID, botID).Scan(&allowed)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	if allowed != 1 {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM conversation_members WHERE user_id=? AND conversation_id IN (SELECT id FROM conversations WHERE organisation_id=?)`, botID, organisationID); err != nil {
+		returnServerError(w)
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM organisation_memberships WHERE organisation_id=? AND user_id=?`, organisationID, botID); err != nil {
+		returnServerError(w)
+		return
+	}
+	var remainingMemberships int
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM organisation_memberships WHERE user_id=?`, botID).Scan(&remainingMemberships); err != nil {
+		returnServerError(w)
+		return
+	}
+	if remainingMemberships == 0 {
+		if _, err = tx.ExecContext(r.Context(), `DELETE FROM api_keys WHERE user_id=?`, botID); err != nil {
+			returnServerError(w)
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), `DELETE FROM users WHERE id=? AND NOT EXISTS(SELECT 1 FROM messages WHERE author_id=?)`, botID, botID); err != nil {
+			returnServerError(w)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		returnServerError(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) rotateBotKey(w http.ResponseWriter, r *http.Request) { s.replaceBotKey(w, r, false) }
