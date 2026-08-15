@@ -9,7 +9,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({}, 401))
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
-      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
       .mockImplementationOnce(() => json([]))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
@@ -27,7 +27,7 @@ describe('K-Mainstay UI', () => {
   it('shows chronological complete messages and posts from the composer', async () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
-      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
       .mockImplementationOnce(() => json([
         { id: 'm1', author_name: 'Michael', author_kind: 'human', body: 'Hello **bot**', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
@@ -51,7 +51,7 @@ describe('K-Mainstay UI', () => {
 
   it('creates a bot and presents its API key once with copy warning', async () => {
     const fetcher = loadedFetcher()
-    fetcher.mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', api_key: 'km_live_lookup_secret' }, 201))
+    fetcher.mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
     Object.assign(navigator, { clipboard: { writeText: vi.fn() } })
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
@@ -81,12 +81,68 @@ describe('K-Mainstay UI', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', expect.objectContaining({ body: JSON.stringify({ name: 'Planning', visibility: 'members', member_ids: ['b1'] }) }))
     expect(wrapper.text()).toContain('Planning')
   })
+
+  it('opens the organisation roster with user roles', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json([
+      { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+      { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+    ]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/users', undefined)
+    expect(wrapper.get('[data-testid=organisation-users]').text()).toContain('Michaeladmin')
+    expect(wrapper.get('[data-testid=organisation-users]').text()).toContain('HectormemberBOT')
+  })
+
+  it('hides organisation administration controls from members', async () => {
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u2', name: 'Member', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'member' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => json([{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    expect(wrapper.find('[data-testid=add-user]').exists()).toBe(false)
+    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid=rotate-key-b1]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=revoke-key-b1]').exists()).toBe(false)
+  })
+
+  it('lets an admin rotate and revoke a bot key', async () => {
+    const fetcher = loadedFetcher()
+    const roster = [{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]
+    fetcher
+      .mockImplementationOnce(() => json(roster))
+      .mockImplementationOnce(() => json({ api_key: 'km_live_rotated_secret' }, 201))
+      .mockImplementationOnce(() => json(roster))
+      .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=rotate-key-b1]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Copy the rotated key now')
+    expect(wrapper.text()).toContain('km_live_rotated_secret')
+    await wrapper.get('.modal .close').trigger('click')
+    await wrapper.get('[data-testid=organisation]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/bots/b1/key', expect.objectContaining({ method: 'DELETE' }))
+    expect(wrapper.text()).toContain('Hector key revoked')
+  })
 })
 
 function loadedFetcher() {
   return vi.fn()
     .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
-    .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay' }]))
+    .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
     .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
     .mockImplementationOnce(() => json([]))
 }

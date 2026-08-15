@@ -224,7 +224,7 @@ func TestCreateBot_RejectsInaccessibleConversationsAndRollsBack(t *testing.T) {
 		args  []any
 	}{
 		{`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('usr_other','human','other@example.com','Other',?,?)`, []any{passwordHash, now}},
-		{`INSERT INTO organisation_memberships(organisation_id,user_id,created_at) VALUES(?,'usr_other',?)`, []any{boot.OrganisationID, now}},
+		{`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_other','member','other',?)`, []any{boot.OrganisationID, now}},
 		{`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('con_private',?,'private','members',?)`, []any{boot.OrganisationID, now}},
 		{`INSERT INTO conversation_members(conversation_id,user_id) VALUES('con_private','usr_other')`, nil},
 		{`INSERT INTO organisations(id,name,created_at) VALUES('org_other','Other org',?)`, []any{now}},
@@ -249,6 +249,78 @@ func TestCreateBot_RejectsInaccessibleConversationsAndRollsBack(t *testing.T) {
 	var bots int
 	if err := db.QueryRow(`SELECT count(*) FROM users WHERE kind='bot'`).Scan(&bots); err != nil || bots != 0 {
 		t.Fatalf("rolled-back bots = %d, err=%v", bots, err)
+	}
+}
+
+func TestOrganisationAdministration_RequiresAdminAndRejectsDuplicateNames(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "roles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "michael@example.com", "Michael", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	admin := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "michael@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var organisations []map[string]string
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, server.URL+"/api/organisations", "", "", nil), http.StatusOK, &organisations)
+	if len(organisations) != 1 || organisations[0]["role"] != "admin" {
+		t.Fatalf("organisations = %#v", organisations)
+	}
+	var users []map[string]string
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/users", "", "", nil), http.StatusOK, &users)
+	if len(users) != 1 || users[0]["name"] != "Michael" || users[0]["role"] != "admin" {
+		t.Fatalf("users = %#v", users)
+	}
+
+	created := requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"})
+	var bot struct {
+		ID     string `json:"id"`
+		APIKey string `json:"api_key"`
+		Role   string `json:"role"`
+	}
+	decodeResponse(t, created, http.StatusCreated, &bot)
+	if bot.Role != "member" {
+		t.Fatalf("bot role = %q", bot.Role)
+	}
+	duplicate := requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "  heCTOR  "})
+	if duplicate.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate status = %d: %s", duplicate.StatusCode, readBody(duplicate))
+	}
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Élodie"}), http.StatusCreated, &map[string]any{})
+	unicodeDuplicate := requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "\u2003élodie\u00a0"})
+	if unicodeDuplicate.StatusCode != http.StatusConflict {
+		t.Fatalf("unicode duplicate status = %d: %s", unicodeDuplicate.StatusCode, readBody(unicodeDuplicate))
+	}
+
+	var passwordHash string
+	if err := db.QueryRow(`SELECT password_hash FROM users WHERE id=?`, boot.UserID).Scan(&passwordHash); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('usr_member','human','member@example.com','Member',?,?)`, passwordHash, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_member','member','member',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	member := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "member@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	for action, response := range map[string]*http.Response{
+		"create bot":      requestJSON(t, member, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Denied"}),
+		"rotate key":      requestJSON(t, member, http.MethodPost, server.URL+"/api/bots/"+bot.ID+"/key", server.URL, "", nil),
+		"revoke key":      requestJSON(t, member, http.MethodDelete, server.URL+"/api/bots/"+bot.ID+"/key", server.URL, "", nil),
+		"bot creates bot": requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", "", bot.APIKey, map[string]any{"name": "Denied bot"}),
+	} {
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s status = %d: %s", action, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
 	}
 }
 

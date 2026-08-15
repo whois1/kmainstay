@@ -183,7 +183,7 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 func (s *server) me(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, current(r)) }
 
 func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT o.id,o.name FROM organisations o JOIN organisation_memberships m ON m.organisation_id=o.id WHERE m.user_id=? ORDER BY o.created_at,o.id`, current(r).ID)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT o.id,o.name,m.role FROM organisations o JOIN organisation_memberships m ON m.organisation_id=o.id WHERE m.user_id=? ORDER BY o.created_at,o.id`, current(r).ID)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -191,9 +191,9 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]string{}
 	for rows.Next() {
-		var id, name string
-		if rows.Scan(&id, &name) == nil {
-			items = append(items, map[string]string{"id": id, "name": name})
+		var id, name, role string
+		if rows.Scan(&id, &name, &role) == nil {
+			items = append(items, map[string]string{"id": id, "name": name, "role": role})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -221,7 +221,7 @@ func (s *server) users(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT u.id,u.kind,u.name FROM users u JOIN organisation_memberships m ON m.user_id=u.id WHERE m.organisation_id=? ORDER BY u.created_at,u.id`, r.PathValue("organisation"))
+	rows, err := s.db.QueryContext(r.Context(), `SELECT u.id,u.kind,u.name,m.role FROM users u JOIN organisation_memberships m ON m.user_id=u.id WHERE m.organisation_id=? ORDER BY u.created_at,u.id`, r.PathValue("organisation"))
 	if err != nil {
 		returnServerError(w)
 		return
@@ -229,9 +229,9 @@ func (s *server) users(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]string{}
 	for rows.Next() {
-		var id, kind, name string
-		if rows.Scan(&id, &kind, &name) == nil {
-			items = append(items, map[string]string{"id": id, "kind": kind, "name": name})
+		var id, kind, name, role string
+		if rows.Scan(&id, &kind, &name, &role) == nil {
+			items = append(items, map[string]string{"id": id, "kind": kind, "name": name, "role": role})
 		}
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -290,7 +290,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
-	if current(r).Kind != "human" || !s.organisationMember(r.Context(), r.PathValue("organisation"), current(r).ID) {
+	if current(r).Kind != "human" || s.organisationRole(r.Context(), r.PathValue("organisation"), current(r).ID) != "admin" {
 		writeError(w, 403, "access denied")
 		return
 	}
@@ -322,7 +322,11 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 		returnServerError(w)
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO organisation_memberships(organisation_id,user_id,created_at) VALUES(?,?,?)`, r.PathValue("organisation"), botID, now); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,'member',?,?)`, r.PathValue("organisation"), botID, database.NormalizeName(in.Name), now); err != nil {
+		if strings.Contains(err.Error(), "organisation_memberships.organisation_id, organisation_memberships.name_normalized") {
+			writeError(w, http.StatusConflict, "user name already exists")
+			return
+		}
 		returnServerError(w)
 		return
 	}
@@ -359,7 +363,7 @@ func (s *server) createBot(w http.ResponseWriter, r *http.Request) {
 		returnServerError(w)
 		return
 	}
-	writeJSON(w, 201, map[string]string{"id": botID, "name": strings.TrimSpace(in.Name), "kind": "bot", "api_key": key})
+	writeJSON(w, 201, map[string]string{"id": botID, "name": strings.TrimSpace(in.Name), "kind": "bot", "role": "member", "api_key": key})
 }
 
 func (s *server) rotateBotKey(w http.ResponseWriter, r *http.Request) { s.replaceBotKey(w, r, false) }
@@ -622,13 +626,18 @@ func (s *server) organisationMember(ctx context.Context, org, user string) bool 
 	var n int
 	return s.db.QueryRowContext(ctx, `SELECT count(*) FROM organisation_memberships WHERE organisation_id=? AND user_id=?`, org, user).Scan(&n) == nil && n == 1
 }
+func (s *server) organisationRole(ctx context.Context, org, user string) string {
+	var role string
+	_ = s.db.QueryRowContext(ctx, `SELECT role FROM organisation_memberships WHERE organisation_id=? AND user_id=?`, org, user).Scan(&role)
+	return role
+}
 func (s *server) canAccess(ctx context.Context, conversation, user string) bool {
 	var n int
 	return s.db.QueryRowContext(ctx, `SELECT count(*) FROM conversations c JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=? WHERE c.id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, user, conversation, user).Scan(&n) == nil && n == 1
 }
 func (s *server) canManageBot(ctx context.Context, bot, human string) bool {
 	var n int
-	return s.db.QueryRowContext(ctx, `SELECT count(*) FROM organisation_memberships b JOIN users u ON u.id=b.user_id AND u.kind='bot' JOIN organisation_memberships h ON h.organisation_id=b.organisation_id WHERE b.user_id=? AND h.user_id=?`, bot, human).Scan(&n) == nil && n > 0
+	return s.db.QueryRowContext(ctx, `SELECT count(*) FROM organisation_memberships b JOIN users u ON u.id=b.user_id AND u.kind='bot' JOIN organisation_memberships h ON h.organisation_id=b.organisation_id AND h.role='admin' WHERE b.user_id=? AND h.user_id=?`, bot, human).Scan(&n) == nil && n > 0
 }
 func (s *server) allowMessage(id string) bool {
 	s.mu.Lock()

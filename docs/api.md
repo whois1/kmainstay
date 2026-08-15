@@ -15,8 +15,8 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 | `GET` | `/api/organisations` | either | — | `200 Organisation[]` |
 | `GET/POST` | `/api/organisations/{organisation}/conversations` | member | — / `CreateConversationRequest` | `200 Conversation[]` / `201 Conversation` |
 | `GET` | `/api/organisations/{organisation}/users` | member | — | `200 User[]` |
-| `POST` | `/api/organisations/{organisation}/bots` | human | `CreateBotRequest` | `201 BotCreated` |
-| `POST/DELETE` | `/api/bots/{bot}/key` | human | — | `201 {"api_key":"…"}` / `204` |
+| `POST` | `/api/organisations/{organisation}/bots` | organisation admin | `CreateBotRequest` | `201 BotCreated`; duplicate name `409` |
+| `POST/DELETE` | `/api/bots/{bot}/key` | organisation admin | — | `201 {"api_key":"…"}` / `204` |
 | `GET` | `/api/conversations/{conversation}/messages?limit=50&before={message_id}` | participant | — | `200 Message[]`, oldest-first |
 | `POST` | `/api/conversations/{conversation}/messages` | participant | `CreateMessageRequest` | `201 Message`; retry `200 Message` |
 | `GET` | `/api/ws?after={sequence}` | either | WebSocket | `MessageCreatedEvent` stream |
@@ -26,9 +26,9 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 ```json
 {"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{
   "Principal":{"type":"object","required":["id","kind","name"],"properties":{"id":{"type":"string"},"kind":{"enum":["human","bot"]},"name":{"type":"string"}}},
-  "Organisation":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}}},
+  "Organisation":{"type":"object","required":["id","name","role"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"role":{"enum":["admin","member"]}}},
   "Conversation":{"type":"object","required":["id","name","visibility"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"visibility":{"enum":["organisation","members"]}}},
-  "User":{"$ref":"#/$defs/Principal"},
+  "User":{"allOf":[{"$ref":"#/$defs/Principal"},{"type":"object","required":["role"],"properties":{"role":{"enum":["admin","member"]}}}]},
   "Message":{"type":"object","required":["id","conversation_id","author_id","author_name","author_kind","body","created_at","sequence"],"properties":{"id":{"type":"string"},"conversation_id":{"type":"string"},"author_id":{"type":"string"},"author_name":{"type":"string"},"author_kind":{"enum":["human","bot"]},"body":{"type":"string","minLength":1,"maxLength":20000},"client_id":{"type":"string"},"created_at":{"type":"string","format":"date-time"},"sequence":{"type":"integer","minimum":1}}},
   "LoginRequest":{"type":"object","required":["email","password"],"properties":{"email":{"type":"string"},"password":{"type":"string"}}},
   "CreateConversationRequest":{"type":"object","required":["name","visibility","member_ids"],"properties":{"name":{"type":"string"},"visibility":{"enum":["organisation","members"]},"member_ids":{"type":"array","items":{"type":"string"},"uniqueItems":true}}},
@@ -39,6 +39,6 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 }}
 ```
 
-Bot keys are returned once. Login attempts are limited to five per minute per normalized email address; the bounded in-memory limiter resets when the process restarts. Concurrent Argon2 password checks are also capped to protect server memory.
+Bot keys are returned once. User display names are trimmed with Unicode whitespace rules and Unicode-lowercased for organisation-scoped uniqueness across both humans and bots. When migration encounters legacy collisions, it preserves every user and deterministically appends ` 2`, ` 3`, and so on to later display names. Membership roles are deliberately limited to `admin` and `member`; bots are members, and only human admins can create bots or rotate/revoke bot keys. Login attempts are limited to five per minute per normalized email address; the bounded in-memory limiter resets when the process restarts. Concurrent Argon2 password checks are also capped to protect server memory.
 
 WebSocket delivery is at-least-once: reconnect with the greatest fully processed `sequence` in `after` and deduplicate by `payload.id`. Each internal notification is only a wake-up; the server reads all authorized durable events after the last delivered sequence, so coalesced notifications do not create gaps. Events contain complete messages only. Revoking an API key rejects new HTTP requests and reconnects but does not forcibly close a WebSocket that already authenticated; clients must reconnect after a close, and conversation-access changes are applied during replay.

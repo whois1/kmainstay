@@ -42,7 +42,7 @@ Local development does not require Caddy. The Go process and Vite development se
 ```text
 Organisation
 User                  kind: human | bot
-OrganisationMembership
+OrganisationMembership role: admin | member; unique normalised user name per organisation
 Conversation          visibility: organisation | members
 ConversationMember
 Message
@@ -79,6 +79,8 @@ Public registration, invitations, password reset, and email delivery are deferre
 6. Rotation revokes the previous active key; explicit revocation is supported.
 
 Fine-grained scopes are deferred. A key inherits its bot user’s current conversation access.
+
+Organisation administration deliberately uses only two membership roles. The bootstrap human is an admin; bots are members. Every member may view the organisation roster, while only human admins may create bots or rotate and revoke bot keys.
 
 ## Messaging
 

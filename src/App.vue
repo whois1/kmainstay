@@ -21,6 +21,9 @@ const addUserStep = ref<'' | 'kind' | 'bot' | 'key'>('')
 const botName = ref('')
 const apiKey = ref('')
 const copied = ref(false)
+const keyAction = ref<'created' | 'rotated'>('created')
+const showOrganisation = ref(false)
+const notice = ref('')
 const showConversation = ref(false)
 const conversationName = ref('')
 const users = ref<User[]>([])
@@ -87,7 +90,32 @@ async function createBot() {
   if (!organisation.value || !botName.value.trim()) return
   try {
     const bot = await request<User & { api_key: string }>(`/api/organisations/${organisation.value.id}/bots`, jsonInit('POST', { name: botName.value }))
-    apiKey.value = bot.api_key; addUserStep.value = 'key'
+    apiKey.value = bot.api_key; keyAction.value = 'created'; copied.value = false; addUserStep.value = 'key'
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function openOrganisation() {
+  if (!organisation.value) return
+  users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`)
+  notice.value = ''
+  showOrganisation.value = true
+}
+
+async function rotateBotKey(bot: User) {
+  try {
+    const result = await request<{ api_key: string }>(`/api/bots/${bot.id}/key`, jsonInit('POST'))
+    apiKey.value = result.api_key
+    keyAction.value = 'rotated'
+    copied.value = false
+    showOrganisation.value = false
+    addUserStep.value = 'key'
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function revokeBotKey(bot: User) {
+  try {
+    await request<void>(`/api/bots/${bot.id}/key`, jsonInit('DELETE'))
+    notice.value = `${bot.name} key revoked`
   } catch (cause) { error.value = messageOf(cause) }
 }
 
@@ -131,10 +159,10 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <aside>
-      <div class="brand"><span class="mark">K</span><div><strong>{{ organisation?.name }}</strong><small>Workspace</small></div></div>
+      <button data-testid="organisation" class="brand" @click="openOrganisation"><span class="mark">K</span><span><strong>{{ organisation?.name }}</strong><small>{{ organisation?.role }}</small></span></button>
       <div class="side-heading"><span>Conversations</span><button data-testid="new-conversation" class="icon-button" aria-label="New private conversation" @click="openConversationDialog">＋</button></div>
       <nav><button v-for="conversation in conversations" :key="conversation.id" :class="{ active: selected?.id === conversation.id }" @click="selectConversation(conversation)"><span>#</span>{{ conversation.name }}<small v-if="conversation.visibility === 'members'">private</small></button></nav>
-      <button data-testid="add-user" class="add-user" @click="addUserStep = 'kind'">＋ Add user</button>
+      <button v-if="organisation?.role === 'admin'" data-testid="add-user" class="add-user" @click="addUserStep = 'kind'">＋ Add user</button>
       <div class="profile"><span>{{ me.name.slice(0, 1) }}</span><div><strong>{{ me.name }}</strong><small>Human</small></div></div>
     </aside>
     <section class="conversation">
@@ -154,8 +182,10 @@ onBeforeUnmount(realtime.disconnect)
     <button class="close" aria-label="Close" @click="addUserStep = ''">×</button>
     <template v-if="addUserStep === 'kind'"><p class="eyebrow">ADD USER</p><h2>Who are you adding?</h2><button data-testid="choose-bot" class="choice" @click="addUserStep = 'bot'"><strong>Bot</strong><span>An automated teammate using an API key</span></button></template>
     <form v-else-if="addUserStep === 'bot'" data-testid="create-bot" @submit.prevent="createBot"><p class="eyebrow">NEW BOT</p><h2>Name your bot</h2><label>Name<input data-testid="bot-name" v-model="botName" autofocus required placeholder="e.g. Hector"></label><button>Create bot</button></form>
-    <template v-else><p class="eyebrow">BOT CREATED</p><h2>Copy this key now</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button></template>
+    <template v-else><p class="eyebrow">{{ keyAction === 'created' ? 'BOT CREATED' : 'KEY ROTATED' }}</p><h2>{{ keyAction === 'created' ? 'Copy this key now' : 'Copy the rotated key now' }}</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button></template>
   </section></div>
+
+  <div v-if="showOrganisation" class="scrim" @click.self="showOrganisation = false"><section class="modal card organisation-modal"><button class="close" aria-label="Close" @click="showOrganisation = false">×</button><p class="eyebrow">ORGANISATION</p><h2>{{ organisation?.name }}</h2><p class="muted">People and bots in this organisation.</p><p v-if="notice" class="notice" role="status">{{ notice }}</p><div data-testid="organisation-users" class="organisation-users"><article v-for="user in users" :key="user.id" class="organisation-user"><div><strong>{{ user.name }}</strong><span class="role-badge">{{ user.role }}</span><span v-if="user.kind === 'bot'" class="bot-badge">BOT</span></div><div v-if="organisation?.role === 'admin' && user.kind === 'bot'" class="key-actions"><button :data-testid="`rotate-key-${user.id}`" class="secondary" @click="rotateBotKey(user)">Rotate key</button><button :data-testid="`revoke-key-${user.id}`" class="danger" @click="revokeBotKey(user)">Revoke key</button></div></article></div></section></div>
 
   <div v-if="showConversation" class="scrim" @click.self="showConversation = false"><form class="modal card" data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="showConversation = false">×</button><p class="eyebrow">PRIVATE CONVERSATION</p><h2>Start a conversation</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" required placeholder="e.g. Planning"></label><fieldset><legend>People</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button>Create conversation</button></form></div>
 </template>

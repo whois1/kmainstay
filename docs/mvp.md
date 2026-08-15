@@ -36,6 +36,9 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - one manually bootstrapped human account;
 - organisations, with the first UI focused on one organisation;
 - human and bot users;
+- an organisation roster with `admin` and `member` roles;
+- organisation-scoped, case-insensitively unique user names;
+- admin-only bot creation and API-key rotation/revocation;
 - organisation-wide named conversations;
 - private conversations with one or more selected users;
 - chronological messages;

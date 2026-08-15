@@ -20,12 +20,12 @@ func TestBootstrap_CreatesInitialHumanOrganisationAndGeneralExactlyOnce(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kind, email, conversation string
-	if err := db.QueryRow(`SELECT u.kind,u.email,c.name FROM users u JOIN organisation_memberships m ON m.user_id=u.id JOIN conversations c ON c.organisation_id=m.organisation_id WHERE u.id=?`, got.UserID).Scan(&kind, &email, &conversation); err != nil {
+	var kind, email, conversation, role, normalisedName string
+	if err := db.QueryRow(`SELECT u.kind,u.email,c.name,m.role,m.name_normalized FROM users u JOIN organisation_memberships m ON m.user_id=u.id JOIN conversations c ON c.organisation_id=m.organisation_id WHERE u.id=?`, got.UserID).Scan(&kind, &email, &conversation, &role, &normalisedName); err != nil {
 		t.Fatal(err)
 	}
-	if kind != "human" || email != "michael@example.com" || conversation != "general" {
-		t.Fatalf("got %q %q %q", kind, email, conversation)
+	if kind != "human" || email != "michael@example.com" || conversation != "general" || role != "admin" || normalisedName != "michael" {
+		t.Fatalf("got %q %q %q %q %q", kind, email, conversation, role, normalisedName)
 	}
 	if _, err := app.Bootstrap(context.Background(), db, "other@example.com", "Other", "long-enough-password", "Other"); !errors.Is(err, app.ErrAlreadyBootstrapped) {
 		t.Fatalf("second bootstrap error = %v", err)
