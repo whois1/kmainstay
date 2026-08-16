@@ -38,6 +38,33 @@ describe('K-Mainstay UI', () => {
     expect(deleteButton.get('[aria-hidden=true]').text()).toBe('Delete')
   })
 
+  it('contains modal focus, closes with Escape and restores the opener', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }]))
+    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const opener = wrapper.get('[data-testid=new-conversation]')
+    ;(opener.element as HTMLElement).focus()
+    await opener.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('[role=dialog]')
+    const input = wrapper.get('[data-testid=conversation-name]')
+    expect(document.activeElement).toBe(input.element)
+
+    const submit = wrapper.get('[data-testid=create-conversation] button:not(.close)')
+    ;(submit.element as HTMLElement).focus()
+    await dialog.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(wrapper.get('[data-testid=create-conversation] .close').element)
+
+    await dialog.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('[data-testid=create-conversation]').exists()).toBe(false)
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
+
   it('logs in and opens the single organisation conversation', async () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({}, 401))
@@ -88,7 +115,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
       .mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
     Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -98,12 +125,14 @@ describe('K-Mainstay UI', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('Copy this key now')
     expect(wrapper.text()).toContain('km_live_lookup_secret')
+    expect(document.activeElement).toBe(wrapper.get('[data-testid=copy-key]').element)
     await wrapper.get('[data-testid=copy-key]').trigger('click')
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('km_live_lookup_secret')
     await flushPromises()
     expect(wrapper.text()).toContain('Select the visible key and copy it manually')
     expect(wrapper.get('.modal [role=alert]').text()).toContain('copy it manually')
     expect(wrapper.get('.modal .close').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
   })
 
   it('creates a private conversation with selected organisation users', async () => {
