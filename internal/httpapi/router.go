@@ -63,6 +63,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("GET /api/organisations", s.withAuth(http.HandlerFunc(s.organisations)))
 		mux.Handle("GET /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.conversations)))
 		mux.Handle("POST /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.createConversation)))
+		mux.Handle("DELETE /api/organisations/{organisation}/conversations/{conversation}", s.withAuth(http.HandlerFunc(s.deleteConversation)))
 		mux.Handle("GET /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.users)))
 		mux.Handle("POST /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.addOrganisationUser)))
 		mux.Handle("GET /api/organisations/{organisation}/eligible-users", s.withAuth(http.HandlerFunc(s.eligibleOrganisationUsers)))
@@ -290,6 +291,33 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "name": in.Name, "visibility": in.Visibility})
+}
+
+func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
+	if current(r).Kind != "human" {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	result, err := s.db.ExecContext(r.Context(), `DELETE FROM conversations
+		WHERE id=? AND organisation_id=?
+		AND EXISTS(SELECT 1 FROM organisation_memberships
+			WHERE organisation_id=? AND user_id=? AND role='admin')`,
+		r.PathValue("conversation"), r.PathValue("organisation"), r.PathValue("organisation"), current(r).ID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	if affected != 1 {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	s.hub.publishConversationDeleted(r.PathValue("organisation"), r.PathValue("conversation"))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) eligibleOrganisationUsers(w http.ResponseWriter, r *http.Request) {
@@ -764,6 +792,8 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 	p := current(r)
 	after := int64(0)
 	_, _ = fmt.Sscan(r.URL.Query().Get("after"), &after)
+	subscriptionID, sub, cancelSubscription := s.hub.subscribe()
+	defer cancelSubscription()
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -783,9 +813,6 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 		return wsjson.Write(writeCtx, c, map[string]any{"version": 1, "type": "message.created", "sequence": m.Sequence, "payload": m})
 	}
 	lastDelivered := after
-	// Subscribe before replay so events committed during the replay cannot fall into a gap.
-	sub, cancel := s.hub.subscribe()
-	defer cancel()
 	replay := func() error {
 		rows, err := s.db.QueryContext(ctx, `SELECT e.sequence FROM realtime_events e JOIN conversations c ON c.id=e.conversation_id JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=? WHERE e.sequence>? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)) ORDER BY e.sequence`, p.ID, lastDelivered, p.ID)
 		if err != nil {
@@ -822,6 +849,18 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-sub:
+			for organisationID, conversationIDs := range s.hub.takeChangedConversations(subscriptionID) {
+				if s.organisationMember(ctx, organisationID, p.ID) {
+					for conversationID := range conversationIDs {
+						writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+						err := wsjson.Write(writeCtx, c, map[string]any{"version": 1, "type": "conversation.deleted", "payload": map[string]string{"id": conversationID}})
+						cancel()
+						if err != nil {
+							return
+						}
+					}
+				}
+			}
 			if err := replay(); err != nil {
 				return
 			}
@@ -927,28 +966,56 @@ func (l *loginLimiter) size() int {
 type hub struct {
 	mu   sync.Mutex
 	next int
-	subs map[int]chan int64
+	subs map[int]*hubSubscriber
 }
 
-func newHub() *hub { return &hub{subs: map[int]chan int64{}} }
-func (h *hub) subscribe() (<-chan int64, func()) {
+type hubSubscriber struct {
+	wake                 chan struct{}
+	changedConversations map[string]map[string]struct{}
+}
+
+func newHub() *hub { return &hub{subs: map[int]*hubSubscriber{}} }
+func (h *hub) subscribe() (int, <-chan struct{}, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.next
 	h.next++
-	ch := make(chan int64, 64)
-	h.subs[id] = ch
-	return ch, func() { h.mu.Lock(); delete(h.subs, id); h.mu.Unlock() }
+	subscriber := &hubSubscriber{wake: make(chan struct{}, 64), changedConversations: map[string]map[string]struct{}{}}
+	h.subs[id] = subscriber
+	return id, subscriber.wake, func() { h.mu.Lock(); delete(h.subs, id); h.mu.Unlock() }
 }
-func (h *hub) publish(seq int64) {
+func (h *hub) publish(_ int64) {
+	h.publishEvent("", "")
+}
+func (h *hub) publishConversationDeleted(organisationID, conversationID string) {
+	h.publishEvent(organisationID, conversationID)
+}
+func (h *hub) publishEvent(organisationID, conversationID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, ch := range h.subs {
+	for _, subscriber := range h.subs {
+		if organisationID != "" {
+			if subscriber.changedConversations[organisationID] == nil {
+				subscriber.changedConversations[organisationID] = map[string]struct{}{}
+			}
+			subscriber.changedConversations[organisationID][conversationID] = struct{}{}
+		}
 		select {
-		case ch <- seq:
+		case subscriber.wake <- struct{}{}:
 		default:
 		}
 	}
+}
+func (h *hub) takeChangedConversations(subscriptionID int) map[string]map[string]struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subscriber := h.subs[subscriptionID]
+	if subscriber == nil || len(subscriber.changedConversations) == 0 {
+		return nil
+	}
+	changed := subscriber.changedConversations
+	subscriber.changedConversations = map[string]map[string]struct{}{}
+	return changed
 }
 
 func newAPIKey() (string, string, string, error) {

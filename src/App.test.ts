@@ -89,6 +89,196 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Planning')
   })
 
+  it('lets an admin delete the selected conversation for everyone', async () => {
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+      .mockImplementationOnce(() => json([]))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledWith('Delete #general? This removes its messages and nobody will be able to send to it.')
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
+    expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    confirm.mockRestore()
+  })
+
+  it('shows a clear empty state after deleting the last conversation', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No conversations')
+    expect(wrapper.text()).not.toContain('# Choose a conversation')
+    expect(wrapper.find('[data-testid=composer]').exists()).toBe(false)
+    expect(wrapper.find('nav button').exists()).toBe(false)
+    confirm.mockRestore()
+  })
+
+  it('keeps a deleted conversation out when an older reconnect refresh finishes later', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    let finishStaleRefresh!: (response: Response) => void
+    let finishDeletionRefresh!: (response: Response) => void
+    const staleRefresh = new Promise<Response>(resolve => { finishStaleRefresh = resolve })
+    const deletionRefresh = new Promise<Response>(resolve => { finishDeletionRefresh = resolve })
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => staleRefresh)
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => deletionRefresh)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    EventSocket.instance.onopen?.()
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
+    finishDeletionRefresh(await json([{ id: 'c2', name: 'planning', visibility: 'organisation' }]))
+    await flushPromises()
+    finishStaleRefresh(await json([
+      { id: 'c1', name: 'general', visibility: 'organisation' },
+      { id: 'c2', name: 'planning', visibility: 'organisation' },
+    ]))
+    await flushPromises()
+
+    expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', undefined)
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/c2/messages?limit=100', undefined)
+  })
+
+  it('removes a remotely deleted conversation even when list refresh fails', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => json({ error: 'List unavailable' }, 500))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
+    await flushPromises()
+
+    expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    expect(wrapper.text()).toContain('List unavailable')
+  })
+
+  it('does not show stale messages when coalesced deletions change the fallback conversation', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    let finishPlanningMessages!: (response: Response) => void
+    const planningMessages = new Promise<Response>(resolve => { finishPlanningMessages = resolve })
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+        { id: 'c3', name: 'delivery', visibility: 'organisation' },
+      ]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => planningMessages)
+      .mockImplementationOnce(() => json([{ id: 'm3', conversation_id: 'c3', author_name: 'Michael', author_kind: 'human', body: 'Delivery message', created_at: '2026-01-01T00:00:03Z', sequence: 3 }]))
+      .mockImplementationOnce(() => json([{ id: 'c3', name: 'delivery', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([{ id: 'c3', name: 'delivery', visibility: 'organisation' }]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c2' } }) } as MessageEvent)
+    await flushPromises()
+    finishPlanningMessages(await json([{ id: 'm2', conversation_id: 'c2', author_name: 'Michael', author_kind: 'human', body: 'Planning message', created_at: '2026-01-01T00:00:02Z', sequence: 2 }]))
+    await flushPromises()
+
+    expect(wrapper.get('h1').text()).toBe('# delivery')
+    expect(wrapper.text()).toContain('Delivery message')
+    expect(wrapper.text()).not.toContain('Planning message')
+  })
+
+  it('discards a late send response after that conversation is deleted', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    let finishSend!: (response: Response) => void
+    const sendResponse = new Promise<Response>(resolve => { finishSend = resolve })
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => sendResponse)
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => json([{ id: 'c2', name: 'planning', visibility: 'organisation' }]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    await wrapper.get('textarea').setValue('Late general message')
+    void wrapper.get('[data-testid=composer]').trigger('submit')
+    await flushPromises()
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
+    await flushPromises()
+    finishSend(await json({ id: 'm1', conversation_id: 'c1', author_name: 'Michael', author_kind: 'human', body: 'Late general message', created_at: '2026-01-01T00:00:01Z', sequence: 1 }, 201))
+    await flushPromises()
+
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    expect(wrapper.text()).not.toContain('Late general message')
+  })
+
   it('opens a full settings page with separate people and bot sections', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([
@@ -177,6 +367,7 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.find('[data-testid=rotate-key-b1]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=revoke-key-b1]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=remove-bot-b1]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
   })
 
   it('lets an admin rotate and revoke a bot key', async () => {

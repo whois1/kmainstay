@@ -87,7 +87,8 @@ Every organisation member can view its roster and accessible conversations. Only
 - list eligible existing human accounts and add one as a member;
 - create bots;
 - rotate or revoke bot keys;
-- remove bots from the organisation.
+- remove bots from the organisation;
+- delete conversations for every participant, including their messages and stored realtime events.
 
 The Vue interface hides unavailable actions, but the Go handlers always enforce the rule again. UI visibility is not treated as security.
 
@@ -104,6 +105,8 @@ Adding a human searches for an existing account by exact email and creates a `me
 7. HTTP returns the complete stored message.
 
 A repeated `(conversation, author, client_id)` returns the existing message instead of creating a duplicate.
+
+Conversation deletion is a separate admin-only path. The database cascades the deletion through members, messages and stored message events, then the hub notifies connected organisation members with `conversation.deleted`. The browser removes the conversation immediately and fetches the authorised conversation list after reconnecting.
 
 ## Realtime read path
 

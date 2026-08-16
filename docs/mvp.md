@@ -41,6 +41,7 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - admin-only bot creation and API-key rotation/revocation;
 - organisation-wide named conversations;
 - private conversations with one or more selected users;
+- admin-only global conversation deletion;
 - chronological messages;
 - safe Markdown rendering, including code blocks;
 - one copy-once API key per bot initially;
@@ -59,7 +60,7 @@ Bots decide whether to respond. The server does not interpret mentions as mandat
 - roles and fine-grained permissions;
 - API-key scopes;
 - nested threads and replies;
-- files, images, reactions, search, notifications, editing, and deletion;
+- files, images, reactions, search, notifications, message editing, and message or file deletion;
 - streaming responses, typing, reasoning, and activity displays;
 - desktop and mobile applications;
 - projects, shared instructions, skills, memory, capabilities, orchestration, and a central brain;

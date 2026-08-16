@@ -80,7 +80,7 @@ Public registration, invitations, password reset, and email delivery are deferre
 
 Fine-grained scopes are deferred. A key inherits its bot user’s current conversation access.
 
-Organisation administration deliberately uses only two membership roles. The bootstrap human is an admin; bots and newly added humans are members. Every member may view the organisation settings page and roster. Human admins may add an existing human account through an exact-email lookup, create bots, rotate or revoke bot keys, and remove bots. Bot removal revokes organisation access but preserves any user identity needed by historical messages. Invitations, account creation, role editing and human deletion are deferred until their security rules are justified.
+Organisation administration deliberately uses only two membership roles. The bootstrap human is an admin; bots and newly added humans are members. Every member may view the organisation settings page and roster. Human admins may add an existing human account through an exact-email lookup, create bots, rotate or revoke bot keys, remove bots, and delete conversations. Conversation deletion is global and cascades through its members, messages and stored message events; connected clients receive `conversation.deleted`, and reconnecting clients refresh their authorised conversation list. Bot removal revokes organisation access but preserves any user identity needed by historical messages. Invitations, account creation, role editing and human deletion are deferred until their security rules are justified.
 
 ## Messaging
 
@@ -95,7 +95,7 @@ Organisation administration deliberately uses only two membership roles. The boo
 
 ## Realtime events
 
-A versioned envelope begins with one event type:
+A versioned envelope uses `message.created` for durable message delivery:
 
 ```json
 {

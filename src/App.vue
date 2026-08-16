@@ -36,6 +36,8 @@ const eligibleEmail = ref('')
 const selectedEligibleUserID = ref('')
 const showAddExisting = ref(false)
 const memberIDs = ref<string[]>([])
+let conversationRefreshGeneration = 0
+let conversationSelectionGeneration = 0
 const people = computed(() => users.value.filter(user => user.kind === 'human'))
 const bots = computed(() => users.value.filter(user => user.kind === 'bot'))
 
@@ -43,7 +45,7 @@ const realtime = useRealtime((message) => {
   if (message.conversation_id === selected.value?.id && !messages.value.some(({ id }) => id === message.id)) {
     messages.value.push(message)
   }
-}, Socket)
+}, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations)
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetcher(url, init)
@@ -81,8 +83,12 @@ async function login() {
 }
 
 async function selectConversation(conversation: Conversation) {
+  const selectionGeneration = ++conversationSelectionGeneration
   selected.value = conversation
-  messages.value = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
+  messages.value = []
+  const selectedMessages = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
+  if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
+  messages.value = selectedMessages
   realtime.seed(messages.value)
   activeView.value = 'chat'
 }
@@ -90,11 +96,19 @@ async function selectConversation(conversation: Conversation) {
 async function sendMessage() {
   if (!composer.value.trim() || !selected.value || busy.value) return
   const body = composer.value
+  const conversationID = selected.value.id
+  const selectionGeneration = conversationSelectionGeneration
+  const isCurrentConversation = () => selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversationID && conversations.value.some(({ id }) => id === conversationID)
   composer.value = ''; busy.value = true; error.value = ''
   try {
-    const message = await request<Message>(`/api/conversations/${selected.value.id}/messages`, jsonInit('POST', { body, client_id: crypto.randomUUID() }))
-    if (!messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
-  } catch (cause) { composer.value = body; error.value = messageOf(cause) } finally { busy.value = false }
+    const message = await request<Message>(`/api/conversations/${conversationID}/messages`, jsonInit('POST', { body, client_id: crypto.randomUUID() }))
+    if (isCurrentConversation() && !messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
+  } catch (cause) {
+    if (isCurrentConversation()) {
+      composer.value = body
+      error.value = messageOf(cause)
+    }
+  } finally { busy.value = false }
 }
 
 async function createBot() {
@@ -210,11 +224,57 @@ async function createConversation() {
   } catch (cause) { error.value = messageOf(cause) }
 }
 
+async function deleteSelectedConversation() {
+  if (!organisation.value || organisation.value.role !== 'admin' || !selected.value || busy.value) return
+  const conversation = selected.value
+  if (!window.confirm(`Delete #${conversation.name}? This removes its messages and nobody will be able to send to it.`)) return
+  busy.value = true
+  error.value = ''
+  try {
+    await request<void>(`/api/organisations/${organisation.value.id}/conversations/${conversation.id}`, jsonInit('DELETE'))
+    await handleConversationDeleted(conversation.id)
+  } catch (cause) { error.value = messageOf(cause) } finally { busy.value = false }
+}
+
+async function handleConversationDeleted(conversationID: string) {
+  if (!conversations.value.some(conversation => conversation.id === conversationID)) return
+  conversations.value = conversations.value.filter(conversation => conversation.id !== conversationID)
+  if (selected.value?.id !== conversationID) return
+  conversationSelectionGeneration++
+  selected.value = null
+  messages.value = []
+  try {
+    if (conversations.value[0]) await selectConversation(conversations.value[0])
+  } catch (cause) { error.value = messageOf(cause) }
+}
+
+async function reconcileDeletedConversation(conversationID: string) {
+  await handleConversationDeleted(conversationID)
+  await refreshConversations()
+}
+
+async function refreshConversations() {
+  if (!organisation.value) return
+  const refreshGeneration = ++conversationRefreshGeneration
+  try {
+    const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
+    if (refreshGeneration !== conversationRefreshGeneration) return
+    const selectedStillExists = currentConversations.some(conversation => conversation.id === selected.value?.id)
+    conversations.value = currentConversations
+    if (selectedStillExists) return
+    conversationSelectionGeneration++
+    selected.value = null
+    messages.value = []
+    if (currentConversations[0]) await selectConversation(currentConversations[0])
+  } catch (cause) {
+    if (refreshGeneration === conversationRefreshGeneration) error.value = messageOf(cause)
+  }
+}
+
 function jsonInit(method: string, body?: unknown): RequestInit {
   return { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }
 }
 function messageOf(cause: unknown) { return cause instanceof Error ? cause.message : 'Something went wrong' }
-const title = computed(() => selected.value?.name ?? 'Choose a conversation')
 onMounted(initialise)
 onBeforeUnmount(realtime.disconnect)
 </script>
@@ -236,7 +296,8 @@ onBeforeUnmount(realtime.disconnect)
       <div class="profile"><span>{{ me.name.slice(0, 1) }}</span><div><strong>{{ me.name }}</strong><small>Human</small></div></div>
     </aside>
     <section v-if="activeView === 'chat'" class="conversation">
-      <header><div><h1># {{ title }}</h1><p>{{ selected?.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div></header>
+      <header v-if="selected"><div><h1># {{ selected.name }}</h1><p>{{ selected.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div><button v-if="organisation?.role === 'admin'" data-testid="delete-conversation" class="danger-outline" :disabled="busy" @click="deleteSelectedConversation">Delete conversation</button></header>
+      <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
       <div class="message-list" aria-live="polite">
         <article v-for="message in messages" :key="message.id" data-testid="message">
           <div class="avatar" :class="{ bot: message.author_kind === 'bot' }">{{ message.author_name.slice(0, 1) }}</div>

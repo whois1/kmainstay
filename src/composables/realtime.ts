@@ -1,10 +1,18 @@
 import type { Message } from '../types'
 
-interface EventEnvelope { type: string; sequence: number; payload: Message }
-type SocketConstructor = new (url: string) => Pick<WebSocket, 'onmessage' | 'onclose' | 'close'>
+interface MessageCreatedEnvelope { type: 'message.created'; sequence: number; payload: Message }
+interface ConversationDeletedEnvelope { type: 'conversation.deleted'; payload: { id: string } }
+type EventEnvelope = MessageCreatedEnvelope | ConversationDeletedEnvelope
+type Socket = Pick<WebSocket, 'onopen' | 'onmessage' | 'onclose' | 'close'>
+type SocketConstructor = new (url: string) => Socket
 
-export function useRealtime(onMessage: (message: Message) => void, Socket: SocketConstructor = WebSocket) {
-  let socket: Pick<WebSocket, 'onmessage' | 'onclose' | 'close'> | undefined
+export function useRealtime(
+  onMessage: (message: Message) => void,
+  Socket: SocketConstructor = WebSocket,
+  onConversationDeleted: (conversationID: string) => void = () => {},
+  onReconnect: () => void = () => {},
+) {
+  let socket: Socket | undefined
   let stopped = false
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let lastSequence = 0
@@ -14,8 +22,13 @@ export function useRealtime(onMessage: (message: Message) => void, Socket: Socke
     stopped = false
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     socket = new Socket(`${protocol}//${location.host}/api/ws?after=${lastSequence}`)
+    socket.onopen = onReconnect
     socket.onmessage = (raw) => {
       const event = JSON.parse(String(raw.data)) as EventEnvelope
+      if (event.type === 'conversation.deleted') {
+        onConversationDeleted(event.payload.id)
+        return
+      }
       if (event.type !== 'message.created') return
       lastSequence = Math.max(lastSequence, event.sequence)
       if (seen.has(event.payload.id)) return
