@@ -53,8 +53,8 @@ h2 { font-size: 18px; line-height: 1.35; }
 .login-card > button, .modal form > button, .modal > button:not(.close) { width: 100%; margin-top: 12px; }
 .product-name, .dialog-context { margin-bottom: 8px; color: var(--secondary); font-size: 13px; font-weight: 500; }
 
-.workspace { height: 100vh; display: grid; grid-template-columns: 264px minmax(0, 1fr); background: var(--canvas); }
-aside { min-width: 0; display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid var(--border); background: var(--canvas); }
+.workspace { height: 100vh; height: 100dvh; overflow: hidden; display: grid; grid-template-columns: 264px minmax(0, 1fr); background: var(--canvas); }
+aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid var(--border); background: var(--canvas); }
 .brand, .profile { display: flex; align-items: center; gap: 12px; padding: 4px 8px 20px; }
 .brand-copy { min-width: 0; }
 .brand-copy strong, .brand-copy small, .profile strong, .profile small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -66,7 +66,7 @@ aside { min-width: 0; display: flex; flex-direction: column; padding: 16px 12px;
 .side-heading { display: flex; align-items: center; justify-content: space-between; padding: 8px; color: var(--secondary); font-size: 13px; font-weight: 500; }
 .icon-button { width: 40px; padding: 0; background: transparent; color: var(--secondary); font-size: 20px; }
 .icon-button:hover { background: var(--hover); color: var(--text); }
-nav { display: grid; gap: 2px; }
+nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; align-content: start; gap: 2px; }
 nav button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px; background: transparent; color: var(--secondary); text-align: left; font-size: 15px; font-weight: 400; }
 nav button:hover { background: var(--hover); color: var(--text); }
 nav button.active { background: var(--raised); color: var(--text); font-weight: 500; }
@@ -75,11 +75,11 @@ nav button.active { background: var(--raised); color: var(--text); font-weight: 
 nav button small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .profile { margin-top: auto; padding-bottom: 4px; }
 
-.conversation { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; position: relative; }
+.conversation { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; position: relative; }
 .conversation > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 76px; padding: 16px max(24px, calc((100% - 840px) / 2)); border-bottom: 1px solid var(--border); }
 .conversation h1 { margin-bottom: 2px; font-size: 20px; }
 .conversation header p, .settings-header p, .settings-section-heading p, .settings-note, .empty-state p { margin: 0; color: var(--secondary); font-size: 13px; }
-.message-list { overflow: auto; padding: 20px max(24px, calc((100% - 840px) / 2)); }
+.message-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }
 .message-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 12px 0; }
 .avatar.bot, .member-avatar.bot { border: 1px solid var(--border); background: var(--surface); color: var(--accent); }
 .message-meta { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
@@ -96,7 +96,7 @@ nav button small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .composer small { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
 .empty-state { align-self: center; justify-self: center; padding: 32px; text-align: center; }
 
-.settings-page { min-width: 0; overflow: auto; position: relative; background: var(--canvas); }
+.settings-page { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; position: relative; background: var(--canvas); }
 .settings-header { display: flex; align-items: flex-start; gap: 24px; padding: 32px max(24px, calc((100% - 800px) / 2)); border-bottom: 1px solid var(--border); }
 .settings-header h1 { margin-bottom: 4px; }
 .back-button { background: transparent; color: var(--secondary); white-space: nowrap; }

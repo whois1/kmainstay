@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
+
+const styles = readFileSync('frontend/src/style.css', 'utf8')
 
 const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
 
@@ -12,6 +15,18 @@ describe('K-Mainstay UI', () => {
     expect(document.documentElement.dataset.theme).toBe('dark')
     expect(document.documentElement.style.colorScheme).toBe('dark')
     expect(wrapper.find('[data-testid=theme-toggle]').exists()).toBe(false)
+  })
+
+  it('keeps navigation and conversation content in independent viewport scroll regions', () => {
+    expect(cssRule('.workspace')).toContain('height: 100dvh')
+    expect(cssRule('.workspace')).toContain('overflow: hidden')
+    expect(cssRule('aside')).toContain('min-height: 0')
+    expect(cssRule('aside')).toContain('overflow: hidden')
+    expect(cssRule('nav')).toContain('min-height: 0')
+    expect(cssRule('nav')).toContain('overflow-y: auto')
+    expect(cssRule('.conversation')).toContain('min-height: 0')
+    expect(cssRule('.conversation')).toContain('overflow: hidden')
+    expect(cssRule('.message-list')).toContain('overflow-y: auto')
   })
 
   it('names the persistent navigation and active product surface', async () => {
@@ -495,6 +510,16 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Hector removed')
   })
 })
+
+function cssRule(selector: string) {
+  const selectorStart = styles.indexOf(`\n${selector} {`)
+  expect(selectorStart, `Missing CSS rule for ${selector}`).toBeGreaterThanOrEqual(0)
+  const ruleStart = styles.indexOf('{', selectorStart)
+  const ruleEnd = styles.indexOf('}', ruleStart)
+  expect(ruleStart).toBeGreaterThan(selectorStart)
+  expect(ruleEnd).toBeGreaterThan(ruleStart)
+  return styles.slice(ruleStart + 1, ruleEnd)
+}
 
 function loadedFetcher() {
   return vi.fn()
