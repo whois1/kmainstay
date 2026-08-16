@@ -1,0 +1,97 @@
+name: Test and deploy development
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kmainstay-development-deployment
+  cancel-in-progress: false
+
+env:
+  PUBLIC_HEALTH_URL: https://170-64-239-198.sslip.io/healthz
+
+jobs:
+  test-and-deploy:
+    name: Test and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: development
+      url: https://170-64-239-198.sslip.io
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Test frontend and reference bot
+        run: npm test
+
+      - name: Build embedded frontend
+        run: npm run build
+
+      - name: Verify generated frontend is committed
+        run: git diff --exit-code -- internal/webui/dist
+
+      - name: Vet Go source
+        run: go vet ./...
+
+      - name: Test Go source with race detection
+        run: go test -race ./...
+
+      - name: Build release binaries
+        run: |
+          mkdir -p release
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o release/kmainstay ./cmd/kmainstay
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o release/kmainstay-initialise ./cmd/kmainstay-initialise
+          sha256sum release/kmainstay release/kmainstay-initialise | tee release/SHA256SUMS
+
+      - name: Configure pinned SSH access
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 0600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0644 ~/.ssh/known_hosts
+
+      - name: Upload and install release
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          application_sha256=$(sha256sum release/kmainstay | cut -d' ' -f1)
+          initialisation_sha256=$(sha256sum release/kmainstay-initialise | cut -d' ' -f1)
+          scp -q release/kmainstay "$DEPLOY_USER@$DEPLOY_HOST:kmainstay.new"
+          scp -q release/kmainstay-initialise "$DEPLOY_USER@$DEPLOY_HOST:kmainstay-initialise.new"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" sudo /usr/local/sbin/kmainstay-install-release \
+            "/home/$DEPLOY_USER/kmainstay.new" \
+            "/home/$DEPLOY_USER/kmainstay-initialise.new" \
+            "$application_sha256" \
+            "$initialisation_sha256"
+
+      - name: Verify public health
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors "$PUBLIC_HEALTH_URL"

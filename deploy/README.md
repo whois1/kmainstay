@@ -17,24 +17,20 @@ The application runs as the unprivileged `kmainstay` user and listens only on `1
 
 ## Deploy an update
 
-Build from a clean, tested checkout:
+Pushing to `main` runs `.github/workflows/deploy-development.yml`. The workflow:
 
-```sh
-npm ci
-npm test
-npm run build
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -race ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o kmainstay ./cmd/kmainstay
-```
+1. installs locked frontend dependencies;
+2. runs frontend, reference-bot, Go race and vet checks;
+3. rebuilds and verifies the committed embedded frontend;
+4. builds stripped Linux AMD64 application and initialisation binaries;
+5. uploads them through the restricted `kmainstay-deploy` SSH account;
+6. verifies checksums, backs up the database and current binaries, restarts the service, and checks local and public health.
 
-Copy the binary to a temporary server path, verify its checksum, install it as root-owned mode `0755`, then restart and check:
+The root-owned `/usr/local/sbin/kmainstay-install-release` script is installed from `deploy/install-release.sh`. It rolls back the binaries and database when the new release fails its local health check, and keeps the ten newest on-server deployment backups.
 
-```sh
-systemctl restart kmainstay
-systemctl is-active kmainstay
-curl -fsS http://127.0.0.1:8080/healthz
-curl -fsS https://170-64-239-198.sslip.io/healthz
-```
+GitHub's `development` environment contains only the deployment SSH credential and pinned host keys. Repository variables provide the host and deployment account. The account can upload release files and use `sudo` only for the fixed installation script.
+
+A deployment can also be started manually from **GitHub → Actions → Test and deploy development → Run workflow**. Do not bypass this with a manual binary copy unless repairing the pipeline itself.
 
 ## Data
 
