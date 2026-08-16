@@ -460,6 +460,13 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Copy the rotated key now')
     await wrapper.get('[data-testid=key-saved]').setValue(true)
     await wrapper.get('.modal .close').trigger('click')
+    confirm.mockClear()
+    confirm.mockReturnValueOnce(false)
+    await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
+    expect(confirm).toHaveBeenCalledWith("Revoke Hector's key? The bot will be disconnected immediately and will need a new key to reconnect.")
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(0)
+
+    confirm.mockReturnValueOnce(true)
     await wrapper.get('[data-testid=revoke-key-b1]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/bots/b1/key', expect.objectContaining({ method: 'DELETE' }))

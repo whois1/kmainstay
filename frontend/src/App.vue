@@ -179,7 +179,7 @@ async function rotateBotKey(bot: User) {
 }
 
 async function revokeBotKey(bot: User) {
-  if (botMutationID.value) return
+  if (botMutationID.value || !window.confirm(`Revoke ${bot.name}'s key? The bot will be disconnected immediately and will need a new key to reconnect.`)) return
   botMutationID.value = bot.id
   try {
     await request<void>(`/api/bots/${bot.id}/key`, jsonInit('DELETE'))
