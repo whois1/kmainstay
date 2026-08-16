@@ -5,6 +5,39 @@ import App from './App.vue'
 const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
 
 describe('K-Mainstay UI', () => {
+  it('declares one dark colour scheme without exposing a theme control', async () => {
+    const wrapper = mount(App, { global: { provide: { fetcher: loadedFetcher(), socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+    expect(wrapper.find('[data-testid=theme-toggle]').exists()).toBe(false)
+  })
+
+  it('names the persistent navigation and active product surface', async () => {
+    const fetcher = loadedFetcher()
+    fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    expect(wrapper.get('aside[aria-label="Workspace navigation"]')).toBeTruthy()
+    expect(wrapper.get('section[aria-label="Conversation"]')).toBeTruthy()
+
+    await wrapper.get('[data-testid=organisation-settings]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('section[data-testid=settings-page][aria-label="Organisation settings"]')).toBeTruthy()
+  })
+
+  it('gives the compact delete control a complete accessible name', async () => {
+    const wrapper = mount(App, { global: { provide: { fetcher: loadedFetcher(), socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const deleteButton = wrapper.get('[data-testid=delete-conversation]')
+    expect(deleteButton.attributes('aria-label')).toBe('Delete conversation')
+    expect(deleteButton.get('[aria-hidden=true]').text()).toBe('Delete')
+  })
+
   it('logs in and opens the single organisation conversation', async () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({}, 401))

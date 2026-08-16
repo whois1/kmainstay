@@ -31,7 +31,7 @@ internal/
   database/                   SQLite opening, migrations and IDs
   httpapi/                    routing, auth, authorisation, messages and WebSockets
   webui/                      embeds the built Vue assets
-src/                          Vue 3 application and tests
+frontend/                     Vue 3 browser application, entry point and tests
 examples/                     reference bot client
 scripts/                      local end-to-end exchange
  deploy/                      systemd, Caddy and SSH configuration
@@ -148,15 +148,17 @@ Historical messages retain their original author name. An existing WebSocket is 
 
 ## Vue application
 
-`src/App.vue` is intentionally one small application component. It owns:
+`frontend/src/App.vue` owns API requests and shared behavioural state for:
 
 - login and initial loading;
 - chat/settings view state;
 - conversation selection and message composition;
 - organisation people and bot administration;
-- copy-once key modals.
+- copy-once key dialogs.
 
-`src/composables/realtime.ts` owns WebSocket reconnect, cursor seeding and message delivery. `src/markdown.ts` renders safe Markdown with raw HTML disabled.
+Meaningful product surfaces live in `frontend/src/components/`: `WorkspaceSidebar.vue`, `ConversationView.vue`, and `OrganisationSettings.vue`. `App.vue` coordinates them while keeping request sequencing and realtime state explicit.
+
+`frontend/src/composables/realtime.ts` owns WebSocket reconnect, cursor seeding and message delivery. `frontend/src/markdown.ts` renders safe Markdown with raw HTML disabled.
 
 The settings view is an in-app page rather than a separate router route. This avoids adding Vue Router for two views; the dependency can be introduced later if deep links or browser-history navigation become a demonstrated need.
 

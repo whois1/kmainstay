@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+  "include": ["frontend/src/**/*.ts", "frontend/src/**/*.vue", "vite.config.ts"]
 }
