@@ -111,8 +111,22 @@ async function selectConversation(conversation: Conversation) {
     ? `/api/conversations/${conversation.id}/messages?limit=100&after_sequence=${readSequence}`
     : `/api/conversations/${conversation.id}/messages?limit=100`
   let selectedMessages: Message[]
+  let selectedPageMessageCount = 0
+  let selectedPageLatestSequence = readSequence
   try {
     selectedMessages = await request<Message[]>(messageURL)
+    selectedPageMessageCount = selectedMessages.length
+    selectedPageLatestSequence = selectedMessages.at(-1)?.sequence ?? readSequence
+    if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
+    const firstUnreadMessageID = latestSequence > readSequence ? selectedMessages[0]?.id : undefined
+    if (firstUnreadMessageID) {
+      try {
+        const recentHistory = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100&before=${encodeURIComponent(firstUnreadMessageID)}`)
+        selectedMessages = mergeMessages(recentHistory, selectedMessages)
+      } catch {
+        // Keep the successfully loaded unread page when optional history is unavailable.
+      }
+    }
   } catch (cause) {
     if (loadGeneration === messageLoadGeneration) {
       loadingConversationID = null
@@ -127,8 +141,7 @@ async function selectConversation(conversation: Conversation) {
     pendingRealtimeMessages = []
   }
   const currentLatestSequence = conversations.value.find(({ id }) => id === conversation.id)?.latest_sequence ?? latestSequence
-  const fetchedLatestSequence = selectedMessages.at(-1)?.sequence ?? readSequence
-  const boundedPageMayHaveGap = selectedMessages.length === 100 && fetchedLatestSequence < currentLatestSequence
+  const boundedPageMayHaveGap = selectedPageMessageCount === 100 && selectedPageLatestSequence < currentLatestSequence
   messages.value = boundedPageMayHaveGap ? selectedMessages : mergeMessages(selectedMessages, realtimeMessages)
   hasNewerMessages.value = (messages.value.at(-1)?.sequence ?? readSequence) < currentLatestSequence
   realtime.seed(messages.value)

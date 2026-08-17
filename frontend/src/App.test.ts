@@ -139,6 +139,71 @@ describe('K-Mainstay UI', () => {
 	expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/read', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ sequence: 2 }) }))
   })
 
+  it('keeps recent history available before the first unread message', async () => {
+    const recentHistory = messagesForReadTest()
+    const unreadMessage = { ...recentHistory[1], id: 'm3', body: 'New', sequence: 3 }
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 2, latest_sequence: 3 }])
+      if (url === '/api/conversations/c1/messages?limit=100&after_sequence=2') return json([unreadMessage])
+      if (url === '/api/conversations/c1/messages?limit=100&before=m3') return json(recentHistory)
+      if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/messages?limit=100&before=m3', undefined)
+    expect(wrapper.findAll('[data-testid=message]').map(message => message.attributes('data-message-id'))).toEqual(['m1', 'm2', 'm3'])
+    expect(wrapper.get('[data-testid=new-messages-divider]').element.nextElementSibling?.getAttribute('data-message-id')).toBe('m3')
+  })
+
+  it('keeps the unread page when recent history cannot be loaded', async () => {
+    const unreadMessage = { ...messagesForReadTest()[1], id: 'm3', body: 'New', sequence: 3 }
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 2, latest_sequence: 3 }])
+      if (url === '/api/conversations/c1/messages?limit=100&after_sequence=2') return json([unreadMessage])
+      if (url === '/api/conversations/c1/messages?limit=100&before=m3') return json({ error: 'History unavailable' }, 500)
+      if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid=message]').map(message => message.attributes('data-message-id'))).toEqual(['m3'])
+  })
+
+  it('does not request history after conversation selection becomes stale', async () => {
+    let finishUnreadMessages!: (response: Response) => void
+    const pendingUnreadMessages = new Promise<Response>(resolve => { finishUnreadMessages = resolve })
+    const unreadMessage = messagesForReadTest()[1]
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 },
+        { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100&after_sequence=1') return pendingUnreadMessages
+      if (url === '/api/conversations/c1/messages?limit=100&before=m2') return json([])
+      if (url === '/api/conversations/c2/messages?limit=100') return json([])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await wrapper.findAll('nav button')[1].trigger('click')
+    await flushPromises()
+    finishUnreadMessages(await json([unreadMessage]))
+    await flushPromises()
+
+    expect(fetcher).not.toHaveBeenCalledWith('/api/conversations/c1/messages?limit=100&before=m2', undefined)
+    expect(wrapper.get('h1').text()).toBe('# planning')
+  })
+
   it('loads a bounded page at the true unread boundary, then jumps to latest', async () => {
     const unreadPage = Array.from({ length: 100 }, (_, index) => ({
       id: `m${index + 2}`, conversation_id: 'c1', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: `Message ${index + 2}`, created_at: '2026-01-01T00:00:00Z', sequence: index + 2,
@@ -149,6 +214,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 }]))
       .mockImplementationOnce(() => json(unreadPage))
+      .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 101 }))
       .mockImplementationOnce(() => json(latestPage))
       .mockImplementationOnce(() => json({ sequence: 201 }))
@@ -169,6 +235,51 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.find('[data-testid=new-messages-divider]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=jump-to-bottom]').exists()).toBe(false)
     expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/read', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ sequence: 201 }) }))
+  })
+
+  it('keeps a bounded unread gap when history and realtime messages arrive during selection', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const unreadPage = Array.from({ length: 100 }, (_, index) => ({
+      id: `m${index + 2}`, conversation_id: 'c2', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: `Message ${index + 2}`, created_at: '2026-01-01T00:00:00Z', sequence: index + 2,
+    }))
+    const history = [{ ...unreadPage[0], id: 'm1', body: 'History', sequence: 1 }]
+    const realtimeMessage = { ...unreadPage[0], id: 'm202', body: 'Realtime', sequence: 202 }
+    let finishHistory!: (response: Response) => void
+    const pendingHistory = new Promise<Response>(resolve => { finishHistory = resolve })
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+        { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/conversations/c2/messages?limit=100&after_sequence=1') return json(unreadPage)
+      if (url === '/api/conversations/c2/messages?limit=100&before=m2') return pendingHistory
+      if (url === '/api/conversations/c2/read') return json({ sequence: 101 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    const selection = wrapper.findAll('nav button')[1].trigger('click')
+    await Promise.resolve()
+    await Promise.resolve()
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 202, payload: realtimeMessage }) } as MessageEvent)
+    finishHistory(await json(history))
+    await selection
+    await flushPromises()
+
+    const renderedMessages = wrapper.findAll('[data-testid=message]')
+    expect(renderedMessages[renderedMessages.length - 1]?.attributes('data-message-id')).toBe('m101')
+    expect(wrapper.get('[data-testid=jump-to-bottom]').attributes('aria-label')).toBe('Jump to latest message')
   })
 
   it('merges realtime arrivals that occur during conversation selection', async () => {
@@ -193,6 +304,7 @@ describe('K-Mainstay UI', () => {
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/conversations/c2/messages?limit=100&after_sequence=1') return planningMessages
+      if (url === '/api/conversations/c2/messages?limit=100&before=m2') return json([])
       if (url === '/api/conversations/c2/read') return json({ sequence: 3 })
       throw new Error(`Unexpected request: ${url}`)
     })
@@ -229,6 +341,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 }])
       if (url === '/api/conversations/c1/messages?limit=100&after_sequence=1') return json(unreadPage)
+      if (url === '/api/conversations/c1/messages?limit=100&before=m2') return json([])
       if (url === '/api/conversations/c1/messages?limit=100') return latestMessages
       if (url === '/api/conversations/c1/read') return json({ sequence: 202 })
       throw new Error(`Unexpected request: ${url}`)
@@ -346,9 +459,11 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
+      .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ error: 'Read sync failed' }, 500))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
+      .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 2 }))
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
     await flushPromises()
@@ -376,6 +491,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
+      .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 2 }))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
