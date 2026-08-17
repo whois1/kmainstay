@@ -21,8 +21,9 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 | `POST` | `/api/organisations/{organisation}/bots` | organisation admin | `CreateBotRequest` | `201 BotCreated`; duplicate name `409` |
 | `DELETE` | `/api/organisations/{organisation}/bots/{bot}` | organisation admin | — | `204` |
 | `POST/DELETE` | `/api/bots/{bot}/key` | organisation admin | — | `201 {"api_key":"…"}` / `204` |
-| `GET` | `/api/conversations/{conversation}/messages?limit=50&before={message_id}` | participant | — | `200 Message[]`, oldest-first |
+| `GET` | `/api/conversations/{conversation}/messages?limit=50&before={message_id}` or `?limit=100&after_sequence={sequence}` | participant | — | `200 Message[]`, oldest-first |
 | `POST` | `/api/conversations/{conversation}/messages` | participant | `CreateMessageRequest` | `201 Message`; retry `200 Message` |
+| `PUT` | `/api/conversations/{conversation}/read` | participant | `ReadPositionRequest` | `200 ReadPosition` |
 | `GET` | `/api/ws?after={sequence}` | either | WebSocket | `MessageCreatedEvent` and `ConversationDeletedEvent` stream |
 
 ## JSON Schema
@@ -31,7 +32,7 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 {"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{
   "Principal":{"type":"object","required":["id","kind","name"],"properties":{"id":{"type":"string"},"kind":{"enum":["human","bot"]},"name":{"type":"string"}}},
   "Organisation":{"type":"object","required":["id","name","role"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"role":{"enum":["admin","member"]}}},
-  "Conversation":{"type":"object","required":["id","name","visibility"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"visibility":{"enum":["organisation","members"]}}},
+  "Conversation":{"type":"object","required":["id","name","visibility"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"visibility":{"enum":["organisation","members"]},"read_sequence":{"type":"integer","minimum":0},"latest_sequence":{"type":"integer","minimum":0}}},
   "User":{"allOf":[{"$ref":"#/$defs/Principal"},{"type":"object","required":["role"],"properties":{"role":{"enum":["admin","member"]}}}]},
   "EligibleUser":{"type":"object","required":["id","name","email"],"properties":{"id":{"type":"string"},"name":{"type":"string"},"email":{"type":"string"}}},
   "Message":{"type":"object","required":["id","conversation_id","author_id","author_name","author_kind","body","created_at","sequence"],"properties":{"id":{"type":"string"},"conversation_id":{"type":"string"},"author_id":{"type":"string"},"author_name":{"type":"string"},"author_kind":{"enum":["human","bot"]},"body":{"type":"string","minLength":1,"maxLength":20000},"client_id":{"type":"string"},"created_at":{"type":"string","format":"date-time"},"sequence":{"type":"integer","minimum":1}}},
@@ -41,11 +42,15 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
   "AddOrganisationUserRequest":{"type":"object","required":["user_id"],"properties":{"user_id":{"type":"string"}}},
   "BotCreated":{"allOf":[{"$ref":"#/$defs/User"},{"type":"object","required":["api_key"],"properties":{"api_key":{"type":"string","pattern":"^km_live_"}}}]},
   "CreateMessageRequest":{"type":"object","required":["body"],"properties":{"body":{"type":"string","minLength":1,"maxLength":20000},"client_id":{"type":"string","maxLength":200}}},
+  "ReadPositionRequest":{"type":"object","required":["sequence"],"properties":{"sequence":{"type":"integer","minimum":0}}},
+  "ReadPosition":{"type":"object","required":["sequence"],"properties":{"sequence":{"type":"integer","minimum":0}}},
   "MessageCreatedEvent":{"type":"object","required":["version","type","sequence","payload"],"properties":{"version":{"const":1},"type":{"const":"message.created"},"sequence":{"type":"integer"},"payload":{"$ref":"#/$defs/Message"}}},
   "ConversationDeletedEvent":{"type":"object","required":["version","type","payload"],"properties":{"version":{"const":1},"type":{"const":"conversation.deleted"},"payload":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}}
 }}
 ```
 
 Eligible-user discovery is admin-only, requires an exact email search, and returns a matching existing human only when it is not already in the organisation and its normalised name does not conflict. Results contain only ID, name and email. Adding one always creates a `member` membership; it does not create an account or invitation. Bot keys are returned once. User display names are trimmed with Unicode whitespace rules, canonicalised to NFC, and Unicode-lowercased for organisation-scoped uniqueness across both humans and bots. When migration encounters legacy collisions, including canonically equivalent NFC/NFD spellings, it preserves every user and deterministically appends ` 2`, ` 3`, and so on to later display names. Membership roles are deliberately limited to `admin` and `member`; bots are members, and only human admins can add existing humans, create bots, rotate/revoke keys, remove bots, or delete conversations. Deleting a conversation removes it and all of its messages and realtime events for every participant, so no existing participant or API key can continue messaging it. Bot removal deletes the bot's membership and private-conversation access in that organisation. When no memberships remain, its keys are deleted; the user identity remains only when required to preserve authored-message attribution. Login attempts are limited to five per minute per normalized email address; the bounded in-memory limiter resets when the process restarts. Concurrent Argon2 password checks are also capped to protect server memory.
+
+Conversation-list responses include `read_sequence` and `latest_sequence` for the authenticated principal; older create-conversation response shapes remain unchanged. `after_sequence` retrieves the next bounded page in event order so clients can open at the true unread boundary without loading an entire large history. Read positions are monotonic. A positive sequence submitted to the read endpoint must identify a message in that conversation, and successfully creating a message advances its author's position in the same transaction.
 
 Message delivery over WebSocket is at-least-once: reconnect with the greatest fully processed `sequence` in `after` and deduplicate by `payload.id`. Each internal message notification is only a wake-up; the server reads all authorised durable message events after the last delivered sequence, so coalesced notifications do not create gaps. `conversation.deleted` is an immediate list-removal notification for connected organisation members and has no sequence because deletion removes the conversation's stored events. Clients must fetch the authorised conversation list after reconnecting, which also reconciles any deletion notification missed while disconnected. Revoking an API key rejects new HTTP requests and reconnects but does not forcibly close a WebSocket that already authenticated; clients must reconnect after a close, and conversation-access changes are applied during replay.

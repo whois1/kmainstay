@@ -22,6 +22,9 @@ var membershipRolesMigration string
 //go:embed migrations/003_canonical_names.sql
 var canonicalNamesMigration string
 
+//go:embed migrations/004_conversation_read_positions.sql
+var conversationReadPositionsMigration string
+
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -81,6 +84,17 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 3 names: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(3,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=4`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(conversationReadPositionsMigration); err != nil {
+			return fmt.Errorf("migration 4: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(4,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}

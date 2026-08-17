@@ -73,6 +73,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("DELETE /api/bots/{bot}/key", s.withAuth(http.HandlerFunc(s.revokeBotKey)))
 		mux.Handle("GET /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.messages)))
 		mux.Handle("POST /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.postMessage)))
+		mux.Handle("PUT /api/conversations/{conversation}/read", s.withAuth(http.HandlerFunc(s.putConversationRead)))
 		mux.Handle("GET /api/ws", s.withAuth(http.HandlerFunc(s.webSocket)))
 	}
 	if deps.Assets != nil {
@@ -204,17 +205,23 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.visibility FROM conversations c JOIN organisation_memberships om ON om.organisation_id=c.organisation_id WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)) ORDER BY c.created_at,c.id`, r.PathValue("organisation"), current(r).ID, current(r).ID)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0)
+		FROM conversations c
+		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
+		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=om.user_id
+		WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))
+		ORDER BY c.created_at,c.id`, r.PathValue("organisation"), current(r).ID, current(r).ID)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
 	defer rows.Close()
-	items := []map[string]string{}
+	items := []map[string]any{}
 	for rows.Next() {
 		var id, name, visibility string
-		if rows.Scan(&id, &name, &visibility) == nil {
-			items = append(items, map[string]string{"id": id, "name": name, "visibility": visibility})
+		var readSequence, latestSequence int64
+		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence) == nil {
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "read_sequence": readSequence, "latest_sequence": latestSequence})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -647,6 +654,11 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	before := r.URL.Query().Get("before")
+	afterRaw := r.URL.Query().Get("after_sequence")
+	if before != "" && afterRaw != "" {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return
+	}
 	if before != "" {
 		var exists int
 		if err := s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM messages WHERE id=? AND conversation_id=?`, before, r.PathValue("conversation")).Scan(&exists); err != nil {
@@ -658,12 +670,26 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rows, err := s.db.QueryContext(r.Context(), `WITH page AS (
-		SELECT m.id,m.conversation_id,m.author_id,u.name AS author_name,u.kind AS author_kind,m.body,coalesce(m.client_id,'') AS client_id,m.created_at,e.sequence
-		FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id
-		WHERE m.conversation_id=? AND (?='' OR (m.created_at,m.id) < (SELECT created_at,id FROM messages WHERE id=? AND conversation_id=m.conversation_id))
-		ORDER BY m.created_at DESC,m.id DESC LIMIT ?
-	) SELECT id,conversation_id,author_id,author_name,author_kind,body,client_id,created_at,sequence FROM page ORDER BY created_at,id`, r.PathValue("conversation"), before, before, limit)
+	var rows *sql.Rows
+	var err error
+	if afterRaw != "" {
+		afterSequence, parseErr := strconv.ParseInt(afterRaw, 10, 64)
+		if parseErr != nil || afterSequence < 0 {
+			writeError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+		rows, err = s.db.QueryContext(r.Context(), `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence
+			FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id
+			WHERE m.conversation_id=? AND e.sequence>?
+			ORDER BY e.sequence LIMIT ?`, r.PathValue("conversation"), afterSequence, limit)
+	} else {
+		rows, err = s.db.QueryContext(r.Context(), `WITH page AS (
+			SELECT m.id,m.conversation_id,m.author_id,u.name AS author_name,u.kind AS author_kind,m.body,coalesce(m.client_id,'') AS client_id,m.created_at,e.sequence
+			FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id
+			WHERE m.conversation_id=? AND (?='' OR (m.created_at,m.id) < (SELECT created_at,id FROM messages WHERE id=? AND conversation_id=m.conversation_id))
+			ORDER BY m.created_at DESC,m.id DESC LIMIT ?
+		) SELECT id,conversation_id,author_id,author_name,author_kind,body,client_id,created_at,sequence FROM page ORDER BY created_at,id`, r.PathValue("conversation"), before, before, limit)
+	}
 	if err != nil {
 		returnServerError(w)
 		return
@@ -718,6 +744,54 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 		status = 201
 	}
 	writeJSON(w, status, m)
+}
+
+func (s *server) putConversationRead(w http.ResponseWriter, r *http.Request) {
+	conversationID := r.PathValue("conversation")
+	p := current(r)
+	if !s.canAccess(r.Context(), conversationID, p.ID) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	var input struct {
+		Sequence *int64 `json:"sequence"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if input.Sequence == nil || *input.Sequence < 0 {
+		writeError(w, http.StatusBadRequest, "invalid sequence")
+		return
+	}
+	sequence := *input.Sequence
+	if sequence > 0 {
+		var exists int
+		if err := s.db.QueryRowContext(r.Context(), `SELECT count(*)
+			FROM realtime_events event
+			JOIN messages message ON message.id=event.message_id
+			WHERE event.sequence=? AND message.conversation_id=?`, sequence, conversationID).Scan(&exists); err != nil {
+			returnServerError(w)
+			return
+		}
+		if exists != 1 {
+			writeError(w, http.StatusBadRequest, "sequence is not in conversation")
+			return
+		}
+	}
+	if _, err := s.db.ExecContext(r.Context(), `INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at)
+		VALUES(?,?,?,?)
+		ON CONFLICT(user_id,conversation_id) DO UPDATE SET
+			sequence=max(sequence,excluded.sequence),
+			updated_at=CASE WHEN excluded.sequence>sequence THEN excluded.updated_at ELSE updated_at END`, p.ID, conversationID, sequence, nowText()); err != nil {
+		returnServerError(w)
+		return
+	}
+	var persisted int64
+	if err := s.db.QueryRowContext(r.Context(), `SELECT sequence FROM conversation_read_positions WHERE user_id=? AND conversation_id=?`, p.ID, conversationID).Scan(&persisted); err != nil {
+		returnServerError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"sequence": persisted})
 }
 
 var errMessageAccessDenied = errors.New("message access denied")
@@ -776,6 +850,11 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 		return message{}, false, err
 	}
 	m.Sequence, _ = res.LastInsertId()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at)
+		VALUES(?,?,?,?)
+		ON CONFLICT(user_id,conversation_id) DO UPDATE SET sequence=max(sequence,excluded.sequence),updated_at=excluded.updated_at`, p.ID, conversationID, m.Sequence, m.CreatedAt); err != nil {
+		return message{}, false, err
+	}
 	if err = tx.Commit(); err != nil {
 		return message{}, false, err
 	}

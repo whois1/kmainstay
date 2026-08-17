@@ -23,14 +23,14 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "messages", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
+	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "messages", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
 		var got string
 		if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&got); err != nil {
 			t.Errorf("missing table %s: %v", table, err)
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 }
@@ -55,6 +55,85 @@ func TestOpen_ConfiguresSQLiteForConcurrentIntegrity(t *testing.T) {
 	}
 	if foreignKeys != 1 || busyTimeout != 5000 || journalMode != "wal" {
 		t.Fatalf("foreign_keys=%d busy_timeout=%d journal_mode=%q", foreignKeys, busyTimeout, journalMode)
+	}
+}
+
+func TestOpen_MigrationFourBackfillsAccessibleConversationsToLatestSequence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-three.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	statements := []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay',?)`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('reader','bot','Reader',?)`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('author','bot','Author',?)`,
+		`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','reader','member','reader',?)`,
+		`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','author','member','author',?)`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('public','org','Public','organisation',?)`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('private','org','Private','members',?)`,
+		`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message','public','author','hello',?)`,
+		`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('event','org','public','message',?)`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`DROP TABLE conversation_read_positions; DELETE FROM schema_migrations WHERE version=4`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sequence int64
+	if err := db.QueryRow(`SELECT sequence FROM conversation_read_positions WHERE user_id='reader' AND conversation_id='public'`).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	if sequence != 1 {
+		t.Fatalf("backfilled sequence = %d, want 1", sequence)
+	}
+	var inaccessible int
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_read_positions WHERE user_id='reader' AND conversation_id='private'`).Scan(&inaccessible); err != nil || inaccessible != 0 {
+		t.Fatalf("inaccessible rows = %d, err=%v", inaccessible, err)
+	}
+}
+
+func TestOpen_ConversationReadPositionsEnforceSequenceAndCascade(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "read-constraints.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, statement := range []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','` + now + `')`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('reader','bot','Reader','` + now + `')`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('conversation','org','General','organisation','` + now + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at) VALUES('reader','conversation',-1,?)`, now); err == nil {
+		t.Fatal("negative sequence was accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at) VALUES('reader','conversation',0,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM conversations WHERE id='conversation'`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_read_positions`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rows after cascade = %d, err=%v", count, err)
 	}
 }
 
@@ -112,6 +191,9 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 		CREATE TABLE organisations(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
 		CREATE TABLE users(id TEXT PRIMARY KEY,kind TEXT NOT NULL,email TEXT,name TEXT NOT NULL,password_hash TEXT,created_at TEXT NOT NULL);
 		CREATE TABLE organisation_memberships(organisation_id TEXT NOT NULL REFERENCES organisations(id),user_id TEXT NOT NULL REFERENCES users(id),role TEXT NOT NULL,name_normalized TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(organisation_id,user_id),UNIQUE(organisation_id,name_normalized));
+		CREATE TABLE conversations(id TEXT PRIMARY KEY,organisation_id TEXT NOT NULL REFERENCES organisations(id),visibility TEXT NOT NULL);
+		CREATE TABLE conversation_members(conversation_id TEXT NOT NULL,user_id TEXT NOT NULL,PRIMARY KEY(conversation_id,user_id));
+		CREATE TABLE realtime_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL);
 		INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','` + now + `');
 		INSERT INTO users(id,kind,name,created_at) VALUES('first','bot','Élodie','` + now + `'),('second','bot','ÉLODIE','` + now + `'),('orphan','bot','ÉCHO','` + now + `');
 		INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','first','admin','élodie','` + now + `'),('org','second','member','élodie','` + now + `');`
@@ -128,7 +210,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string
@@ -168,6 +250,9 @@ func TestOpen_MigratesVersionOneMemberships(t *testing.T) {
 		CREATE TABLE organisations(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
 		CREATE TABLE users(id TEXT PRIMARY KEY,kind TEXT NOT NULL,email TEXT,name TEXT NOT NULL,password_hash TEXT,created_at TEXT NOT NULL);
 		CREATE TABLE organisation_memberships(organisation_id TEXT NOT NULL REFERENCES organisations(id),user_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(organisation_id,user_id));
+		CREATE TABLE conversations(id TEXT PRIMARY KEY,organisation_id TEXT NOT NULL REFERENCES organisations(id),visibility TEXT NOT NULL);
+		CREATE TABLE conversation_members(conversation_id TEXT NOT NULL,user_id TEXT NOT NULL,PRIMARY KEY(conversation_id,user_id));
+		CREATE TABLE realtime_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL);
 		INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','` + now + `');
 		INSERT INTO users(id,kind,name,created_at) VALUES('human','human','Michael','` + now + `'),('later_human','human','Member','` + now + `'),('bot','bot','Hector','` + now + `'),('bot_two','bot',' heCTOR ','` + now + `');
 		INSERT INTO organisation_memberships(organisation_id,user_id,created_at) VALUES('org','human','` + now + `'),('org','later_human','` + now + `'),('org','bot','` + now + `'),('org','bot_two','` + now + `');`

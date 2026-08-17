@@ -18,6 +18,8 @@ const organisation = ref<Organisation | null>(null)
 const conversations = ref<Conversation[]>([])
 const selected = ref<Conversation | null>(null)
 const messages = ref<Message[]>([])
+const hasNewerMessages = ref(false)
+const jumpToLatestVersion = ref(0)
 const email = ref('')
 const password = ref('')
 const composer = ref('')
@@ -46,7 +48,9 @@ let conversationRefreshGeneration = 0
 let conversationSelectionGeneration = 0
 
 const realtime = useRealtime((message) => {
-  if (message.conversation_id === selected.value?.id && !messages.value.some(({ id }) => id === message.id)) {
+  const conversation = conversations.value.find(({ id }) => id === message.conversation_id)
+  if (conversation) conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
+  if (message.conversation_id === selected.value?.id && !hasNewerMessages.value && !messages.value.some(({ id }) => id === message.id)) {
     messages.value.push(message)
   }
 }, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations)
@@ -90,11 +94,34 @@ async function selectConversation(conversation: Conversation) {
   const selectionGeneration = ++conversationSelectionGeneration
   selected.value = conversation
   messages.value = []
-  const selectedMessages = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
+  hasNewerMessages.value = false
+  const readSequence = conversation.read_sequence ?? 0
+  const latestSequence = conversation.latest_sequence ?? readSequence
+  const messageURL = latestSequence > readSequence
+    ? `/api/conversations/${conversation.id}/messages?limit=100&after_sequence=${readSequence}`
+    : `/api/conversations/${conversation.id}/messages?limit=100`
+  const selectedMessages = await request<Message[]>(messageURL)
   if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
   messages.value = selectedMessages
+  hasNewerMessages.value = Boolean(selectedMessages.length && selectedMessages.at(-1)!.sequence < latestSequence)
   realtime.seed(messages.value)
   activeView.value = 'chat'
+}
+
+async function jumpToLatest() {
+  const conversation = selected.value
+  if (!conversation || !hasNewerMessages.value) return
+  const selectionGeneration = conversationSelectionGeneration
+  try {
+    const latestMessages = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
+    if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id) return
+    messages.value = latestMessages
+    hasNewerMessages.value = false
+    realtime.seed(messages.value)
+    jumpToLatestVersion.value++
+  } catch (cause) {
+    if (selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversation.id) error.value = messageOf(cause)
+  }
 }
 
 async function sendMessage() {
@@ -106,13 +133,31 @@ async function sendMessage() {
   composer.value = ''; busy.value = true; error.value = ''
   try {
     const message = await request<Message>(`/api/conversations/${conversationID}/messages`, jsonInit('POST', { body, client_id: crypto.randomUUID() }))
-    if (isCurrentConversation() && !messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
+    if (isCurrentConversation()) {
+      selected.value!.read_sequence = Math.max(selected.value!.read_sequence ?? 0, message.sequence)
+      selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
+      if (hasNewerMessages.value) await jumpToLatest()
+      else if (!messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
+    }
   } catch (cause) {
     if (isCurrentConversation()) {
       composer.value = body
       error.value = messageOf(cause)
     }
   } finally { busy.value = false }
+}
+
+async function markReadThrough(sequence: number) {
+  const conversation = selected.value
+  if (!conversation || sequence <= (conversation.read_sequence ?? 0)) return
+  try {
+    const persisted = await request<{ sequence: number }>(`/api/conversations/${conversation.id}/read`, jsonInit('PUT', { sequence }))
+    const currentConversation = conversations.value.find(({ id }) => id === conversation.id)
+    if (currentConversation) currentConversation.read_sequence = Math.max(currentConversation.read_sequence ?? 0, persisted.sequence)
+    if (selected.value?.id === conversation.id) selected.value.read_sequence = Math.max(selected.value.read_sequence ?? 0, persisted.sequence)
+  } catch (cause) {
+    if (selected.value?.id === conversation.id) error.value = messageOf(cause)
+  }
 }
 
 async function createBot() {
@@ -264,9 +309,16 @@ async function refreshConversations() {
   try {
     const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
     if (refreshGeneration !== conversationRefreshGeneration) return
-    const selectedStillExists = currentConversations.some(conversation => conversation.id === selected.value?.id)
+    const refreshedSelected = currentConversations.find(conversation => conversation.id === selected.value?.id)
+    if (refreshedSelected && selected.value) {
+      refreshedSelected.read_sequence = Math.max(refreshedSelected.read_sequence ?? 0, selected.value.read_sequence ?? 0)
+      refreshedSelected.latest_sequence = Math.max(refreshedSelected.latest_sequence ?? 0, selected.value.latest_sequence ?? 0)
+    }
     conversations.value = currentConversations
-    if (selectedStillExists) return
+    if (refreshedSelected) {
+      selected.value = refreshedSelected
+      return
+    }
     conversationSelectionGeneration++
     selected.value = null
     messages.value = []
@@ -295,7 +347,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" v-model:composer="composer" :selected="selected" :messages="messages" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" />
+    <ConversationView v-if="activeView === 'chat'" v-model:composer="composer" :selected="selected" :messages="messages" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

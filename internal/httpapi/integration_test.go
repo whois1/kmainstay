@@ -3,6 +3,8 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +23,209 @@ import (
 	"kmainstay/internal/database"
 	"kmainstay/internal/httpapi"
 )
+
+func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "read-position.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "read-position-session"
+	digest := sha256.Sum256([]byte(token))
+	if _, err := db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)`, digest[:], boot.UserID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	handler := httpapi.New(httpapi.Dependencies{DB: db})
+	request := httptest.NewRequest(http.MethodGet, "/api/organisations/"+boot.OrganisationID+"/conversations", nil)
+	request.AddCookie(&http.Cookie{Name: "kmainstay_session", Value: token})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	var conversations []map[string]any
+	response := recorder.Result()
+	decodeResponse(t, response, http.StatusOK, &conversations)
+	if len(conversations) != 1 || conversations[0]["id"] != boot.ConversationID || conversations[0]["read_sequence"] != float64(0) || conversations[0]["latest_sequence"] != float64(0) {
+		t.Fatalf("conversations = %#v", conversations)
+	}
+}
+
+func TestPutConversationRead_PersistsValidSequence(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "mark-read.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message',?,?,?,?)`, boot.ConversationID, boot.UserID, "hello", now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('event',?,?,?,?)`, boot.OrganisationID, boot.ConversationID, "message", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, _ := result.LastInsertId()
+	token := "mark-read-session"
+	digest := sha256.Sum256([]byte(token))
+	if _, err := db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)`, digest[:], boot.UserID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), now); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"sequence": sequence})
+	request := httptest.NewRequest(http.MethodPut, "http://example.com/api/conversations/"+boot.ConversationID+"/read", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://example.com")
+	request.AddCookie(&http.Cookie{Name: "kmainstay_session", Value: token})
+	recorder := httptest.NewRecorder()
+	httpapi.New(httpapi.Dependencies{DB: db}).ServeHTTP(recorder, request)
+	var response map[string]any
+	decodeResponse(t, recorder.Result(), http.StatusOK, &response)
+	if response["sequence"] != float64(sequence) {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestPostMessage_AdvancesAuthorReadPosition(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "author-read.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "author@example.com", "Author", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	token := "author-read-session"
+	digest := sha256.Sum256([]byte(token))
+	if _, err := db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)`, digest[:], boot.UserID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), now); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"body": "hello", "client_id": "author-read"})
+	request := httptest.NewRequest(http.MethodPost, "http://example.com/api/conversations/"+boot.ConversationID+"/messages", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://example.com")
+	request.AddCookie(&http.Cookie{Name: "kmainstay_session", Value: token})
+	recorder := httptest.NewRecorder()
+	httpapi.New(httpapi.Dependencies{DB: db}).ServeHTTP(recorder, request)
+	var message map[string]any
+	decodeResponse(t, recorder.Result(), http.StatusCreated, &message)
+	var readSequence int64
+	if err := db.QueryRow(`SELECT sequence FROM conversation_read_positions WHERE user_id=? AND conversation_id=?`, boot.UserID, boot.ConversationID).Scan(&readSequence); err != nil {
+		t.Fatal(err)
+	}
+	if readSequence != int64(message["sequence"].(float64)) {
+		t.Fatalf("read sequence = %d, message = %#v", readSequence, message)
+	}
+}
+
+func TestPutConversationRead_DoesNotMoveBackwards(t *testing.T) {
+	fixture := newReadPositionFixture(t)
+	defer fixture.db.Close()
+	decodeResponse(t, fixture.put(t, fixture.conversationID, fixture.sequence), http.StatusOK, &map[string]any{})
+	var response map[string]any
+	decodeResponse(t, fixture.put(t, fixture.conversationID, 0), http.StatusOK, &response)
+	if response["sequence"] != float64(fixture.sequence) {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestPutConversationRead_RequiresSequence(t *testing.T) {
+	fixture := newReadPositionFixture(t)
+	defer fixture.db.Close()
+	request := httptest.NewRequest(http.MethodPut, "http://example.com/api/conversations/"+fixture.conversationID+"/read", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://example.com")
+	request.AddCookie(&http.Cookie{Name: "kmainstay_session", Value: fixture.token})
+	recorder := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPutConversationRead_RejectsSequenceFromAnotherConversation(t *testing.T) {
+	fixture := newReadPositionFixture(t)
+	defer fixture.db.Close()
+	response := fixture.put(t, fixture.conversationID, fixture.otherSequence)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.StatusCode, readBody(response))
+	}
+}
+
+func TestPutConversationRead_DeniesInaccessibleConversation(t *testing.T) {
+	fixture := newReadPositionFixture(t)
+	defer fixture.db.Close()
+	response := fixture.put(t, fixture.inaccessibleConversationID, fixture.inaccessibleSequence)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", response.StatusCode, readBody(response))
+	}
+}
+
+type readPositionFixture struct {
+	db                         *sql.DB
+	handler                    http.Handler
+	token                      string
+	conversationID             string
+	inaccessibleConversationID string
+	sequence                   int64
+	otherSequence              int64
+	inaccessibleSequence       int64
+}
+
+func newReadPositionFixture(t *testing.T) readPositionFixture {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "read-fixture.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('other',?,'Other','organisation',?),('private',?,'Private','members',?)`, boot.OrganisationID, now, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	conversationIDs := []string{boot.ConversationID, "other", "private"}
+	sequences := make([]int64, 0, len(conversationIDs))
+	for index, conversationID := range conversationIDs {
+		messageID := fmt.Sprintf("fixture-message-%d", index)
+		if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES(?,?,?,'message',?)`, messageID, conversationID, boot.UserID, now); err != nil {
+			t.Fatal(err)
+		}
+		result, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,?,?,?,?)`, fmt.Sprintf("fixture-event-%d", index), boot.OrganisationID, conversationID, messageID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sequence, _ := result.LastInsertId()
+		sequences = append(sequences, sequence)
+	}
+	token := "read-fixture-session"
+	digest := sha256.Sum256([]byte(token))
+	if _, err := db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)`, digest[:], boot.UserID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), now); err != nil {
+		t.Fatal(err)
+	}
+	return readPositionFixture{db: db, handler: httpapi.New(httpapi.Dependencies{DB: db}), token: token, conversationID: boot.ConversationID, inaccessibleConversationID: "private", sequence: sequences[0], otherSequence: sequences[1], inaccessibleSequence: sequences[2]}
+}
+
+func (fixture readPositionFixture) put(t *testing.T, conversationID string, sequence int64) *http.Response {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"sequence": sequence})
+	request := httptest.NewRequest(http.MethodPut, "http://example.com/api/conversations/"+conversationID+"/read", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://example.com")
+	request.AddCookie(&http.Cookie{Name: "kmainstay_session", Value: fixture.token})
+	recorder := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(recorder, request)
+	return recorder.Result()
+}
 
 func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurvivesRestart(t *testing.T) {
 	// Given Michael, his organisation, and general were bootstrapped.
@@ -171,6 +376,12 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 	decodeResponse(t, previousResponse, http.StatusOK, &previous)
 	if len(previous) != 1 || previous[0]["body"] != "  Hello **Hector**  " {
 		t.Fatalf("previous page = %#v", previous)
+	}
+	unreadResponse := requestJSON(t, client, http.MethodGet, server.URL+fmt.Sprintf("/api/conversations/%s/messages?limit=100&after_sequence=%d", boot.ConversationID, humanSequence), "", "", nil)
+	var unread []map[string]any
+	decodeResponse(t, unreadResponse, http.StatusOK, &unread)
+	if len(unread) != 1 || unread[0]["body"] != "Hello Michael" {
+		t.Fatalf("messages after sequence = %#v", unread)
 	}
 	badCursor := requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages?before=msg_missing", "", "", nil)
 	if badCursor.StatusCode != http.StatusBadRequest {
