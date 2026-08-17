@@ -96,6 +96,12 @@ nav button small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .composer textarea { min-height: 48px; resize: none; border: 0; padding: 8px; background: transparent; }
 .composer button { align-self: start; }
 .composer small { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+.composer-input { position: relative; min-width: 0; }
+.composer-input textarea { width: 100%; }
+.mention-picker { position: absolute; z-index: 10; left: 0; bottom: calc(100% + 7px); width: min(24rem, 100%); max-height: 14rem; overflow-y: auto; margin: 0; padding: 6px; list-style: none; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 12px 32px rgb(0 0 0 / 30%); }
+.mention-picker [role="option"] { display: flex; justify-content: space-between; gap: 16px; padding: 9px 10px; border-radius: 6px; cursor: pointer; }
+.mention-picker [role="option"][aria-selected="true"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.mention { padding: 1px 4px; border-radius: 4px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
 .jump-to-bottom { position: absolute; z-index: 2; right: max(24px, calc((100% - 840px) / 2)); bottom: 112px; width: 44px; height: 44px; padding: 0; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--secondary); box-shadow: 0 2px 8px rgb(0 0 0 / 25%); }
 .jump-to-bottom:hover { color: var(--text); border-color: var(--secondary); }
 .empty-state { align-self: center; justify-self: center; padding: 32px; text-align: center; }

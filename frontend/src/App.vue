@@ -80,6 +80,7 @@ async function initialise() {
   if (!organisation.value) return
   conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
   if (conversations.value[0]) await selectConversation(conversations.value[0])
+  try { users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`) } catch { /* Settings can retry a transient roster failure. */ }
   realtime.connect()
 }
 
@@ -92,6 +93,7 @@ async function login() {
     if (organisation.value) {
       conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
       if (conversations.value[0]) await selectConversation(conversations.value[0])
+      try { users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`) } catch { /* Settings can retry a transient roster failure. */ }
       realtime.connect()
     }
   } catch (cause) { error.value = messageOf(cause) } finally { busy.value = false }
@@ -403,7 +405,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" v-model:composer="composer" :selected="selected" :messages="messages" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" v-model:composer="composer" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

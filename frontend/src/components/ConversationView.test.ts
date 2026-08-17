@@ -1,15 +1,76 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import ConversationView from './ConversationView.vue'
-import type { Conversation, Message } from '../types'
+import type { Conversation, Message, User } from '../types'
 
 const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', read_sequence: 1 }
 const messages: Message[] = [
   { id: 'first', conversation_id: 'conversation', author_id: 'reader', author_name: 'Reader', author_kind: 'human', body: 'Read', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
   { id: 'second', conversation_id: 'conversation', author_id: 'writer', author_name: 'Writer', author_kind: 'human', body: 'Unread', created_at: '2026-01-01T00:00:01Z', sequence: 2 },
 ]
+const users: User[] = [
+  { id: 'reader', name: 'Reader', kind: 'human', role: 'admin' },
+  { id: 'hector', name: 'Hector', kind: 'bot', role: 'member' },
+  { id: 'mary', name: 'Mary Jane', kind: 'human', role: 'member' },
+]
 
 describe('ConversationView', () => {
+  it('filters mention suggestions and provides accessible keyboard selection', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    const textarea = wrapper.get('textarea')
+    await textarea.setValue('Ask @ma')
+    await textarea.trigger('input')
+
+    const listbox = wrapper.get('[role=listbox]')
+    expect(listbox.attributes('aria-label')).toBe('Mention a person or bot')
+    expect(wrapper.findAll('[role=option] span').map(option => option.text())).toEqual(['Mary Jane'])
+    expect(wrapper.text()).not.toContain('Readerhuman')
+    expect(textarea.attributes('role')).toBe('combobox')
+    expect(textarea.attributes('aria-activedescendant')).toBe(wrapper.get('[role=option]').attributes('id'))
+
+    await textarea.trigger('keydown', { key: 'ArrowDown' })
+    expect(wrapper.get('[role=option]').attributes('aria-selected')).toBe('true')
+    await textarea.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('update:composer')?.at(-1)).toEqual(['Ask @Mary Jane '])
+  })
+
+  it('keeps Shift+Enter for multiline Markdown instead of sending', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: 'First line', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    await wrapper.get('textarea').trigger('keydown', { key: 'Enter', shiftKey: true })
+    expect(wrapper.emitted('sendMessage')).toBeUndefined()
+  })
+
+  it('supports click selection and preserves surrounding text and caret', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: 'Before @he after', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    const textarea = wrapper.get('textarea').element as HTMLTextAreaElement
+    textarea.focus()
+    textarea.setSelectionRange(10, 10)
+    await wrapper.get('textarea').trigger('input')
+    await wrapper.get('[role=option]').trigger('click')
+    await Promise.resolve()
+
+    expect(wrapper.emitted('update:composer')?.at(-1)).toEqual(['Before @Hector  after'])
+    expect(textarea.selectionStart).toBe('Before @Hector '.length)
+  })
+
+  it('closes the picker with Escape and when the conversation changes', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '@', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    await wrapper.get('textarea').trigger('input')
+    expect(wrapper.find('[role=listbox]').exists()).toBe(true)
+    await wrapper.get('textarea').trigger('keydown', { key: 'Escape' })
+    expect(wrapper.find('[role=listbox]').exists()).toBe(false)
+    await wrapper.get('textarea').trigger('input')
+    await wrapper.setProps({ selected: { ...conversation, id: 'other' } })
+    expect(wrapper.find('[role=listbox]').exists()).toBe(false)
+  })
+
+  it('explains automatic direct bot replies and mention-required routing', () => {
+    const direct = mount(ConversationView, { props: { selected: { ...conversation, visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    expect(direct.get('[data-testid=bot-guidance]').text()).toContain('responds automatically')
+    const group = mount(ConversationView, { props: { selected: { ...conversation, member_ids: ['reader', 'hector', 'mary'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    expect(group.get('[data-testid=bot-guidance]').text()).toContain('@mention')
+  })
+
   it('renders one new-messages divider immediately before the first unread message', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages, composer: '', busy: false, error: '', canDelete: false } })
 

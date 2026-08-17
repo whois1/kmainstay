@@ -22,10 +22,10 @@ bot_created=$(curl -fsS -b "$run_dir/cookies" -H "Origin: $base_url" -H 'Content
 api_key=$(node -e 'const v=JSON.parse(process.argv[1]);process.stdout.write(v.api_key)' "$bot_created")
 KMAINSTAY_URL="$base_url" KMAINSTAY_API_KEY="$api_key" node examples/reference-bot.mjs >"$run_dir/bot.log" 2>&1 & bot_pid=$!
 sleep .3
-curl -fsS -b "$run_dir/cookies" -H "Origin: $base_url" -H 'Content-Type: application/json' -d '{"body":"Hello reference bot","client_id":"local-exchange-human"}' "$base_url/api/conversations/$conversation_id/messages" >/dev/null
+curl -fsS -b "$run_dir/cookies" -H "Origin: $base_url" -H 'Content-Type: application/json' -d '{"body":"Hello @Hector","client_id":"local-exchange-human"}' "$base_url/api/conversations/$conversation_id/messages" >/dev/null
 for _ in {1..50}; do
   history=$(curl -fsS -b "$run_dir/cookies" "$base_url/api/conversations/$conversation_id/messages")
-  if node -e 'const v=JSON.parse(process.argv[1]);process.exit(v.some(m=>m.author_kind==="bot"&&m.body==="Hector received: Hello reference bot")?0:1)' "$history"; then echo "reference exchange passed: Michael -> Hector -> Michael"; exit 0; fi
+  if node -e 'const v=JSON.parse(process.argv[1]);process.exit(v.some(m=>m.author_kind==="bot"&&m.body==="Hector received: Hello @Hector")?0:1)' "$history"; then echo "reference exchange passed: Michael -> Hector -> Michael"; exit 0; fi
   sleep .1
 done
 echo "reference exchange failed" >&2; sed -n '1,120p' "$run_dir/server.log" >&2; sed -n '1,120p' "$run_dir/bot.log" >&2; exit 1

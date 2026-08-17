@@ -270,9 +270,9 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 		t.Fatalf("malformed bot status = %d, want 400: %s", malformedBot.StatusCode, readBody(malformedBot))
 	}
 	privateResponse := requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "humans-only", "visibility": "members"})
-	var privateConversation map[string]string
+	var privateConversation map[string]any
 	decodeResponse(t, privateResponse, http.StatusCreated, &privateConversation)
-	privateDenied := requestJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/conversations/"+privateConversation["id"]+"/messages", "", bot.APIKey, nil)
+	privateDenied := requestJSON(t, http.DefaultClient, http.MethodGet, server.URL+"/api/conversations/"+privateConversation["id"].(string)+"/messages", "", bot.APIKey, nil)
 	if privateDenied.StatusCode != http.StatusForbidden {
 		t.Fatalf("private conversation status = %d: %s", privateDenied.StatusCode, readBody(privateDenied))
 	}
@@ -298,10 +298,10 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 	defer browserSocket.CloseNow()
 
 	// When the human posts, the bot sees the persisted event.
-	humanPost := requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", server.URL, "", map[string]any{"body": "  Hello **Hector**  ", "client_id": "browser-1"})
+	humanPost := requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", server.URL, "", map[string]any{"body": "  Hello @Hector **please**  ", "client_id": "browser-1"})
 	decodeResponse(t, humanPost, http.StatusCreated, &map[string]any{})
 	botEvent := readEvent(t, botSocket)
-	if bodyOf(botEvent) != "  Hello **Hector**  " {
+	if bodyOf(botEvent) != "  Hello @Hector **please**  " {
 		t.Fatalf("bot event = %#v", botEvent)
 	}
 	humanSequence := int64(botEvent["sequence"].(float64))
@@ -329,13 +329,13 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 	retry := requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", bot.APIKey, map[string]any{"body": "ignored retry body", "client_id": "hector-1"})
 	decodeResponse(t, retry, http.StatusOK, &map[string]any{})
 	secondConversationResponse := requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "second", "visibility": "organisation"})
-	var secondConversation map[string]string
+	var secondConversation map[string]any
 	decodeResponse(t, secondConversationResponse, http.StatusCreated, &secondConversation)
-	sameClientIDElsewhere := requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/conversations/"+secondConversation["id"]+"/messages", "", bot.APIKey, map[string]any{"body": "different conversation", "client_id": "hector-1"})
+	sameClientIDElsewhere := requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/conversations/"+secondConversation["id"].(string)+"/messages", "", bot.APIKey, map[string]any{"body": "different conversation", "client_id": "hector-1"})
 	var secondMessage map[string]any
 	decodeResponse(t, sameClientIDElsewhere, http.StatusCreated, &secondMessage)
 	if secondMessage["conversation_id"] != secondConversation["id"] {
-		t.Fatalf("idempotency returned message from %v, want %s", secondMessage["conversation_id"], secondConversation["id"])
+		t.Fatalf("idempotency returned message from %v, want %v", secondMessage["conversation_id"], secondConversation["id"])
 	}
 
 	// When the process restarts, sessions, messages, and key revocation remain durable.
@@ -349,19 +349,19 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 	server = httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
 	defer server.Close()
 	var replayable int
-	if err := db.QueryRow(`SELECT count(*) FROM realtime_events WHERE sequence > ? AND conversation_id=?`, humanSequence, boot.ConversationID).Scan(&replayable); err != nil || replayable != 1 {
-		t.Fatalf("replayable events = %d, want 1: %v", replayable, err)
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_events WHERE conversation_id=?`, boot.ConversationID).Scan(&replayable); err != nil || replayable != 2 {
+		t.Fatalf("durable events = %d, want 2: %v", replayable, err)
 	}
-	replaySocket := dialSocket(t, server.URL+fmt.Sprintf("/api/ws?after=%d", humanSequence), http.Header{"Authorization": {"Bearer " + bot.APIKey}})
+	replaySocket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Authorization": {"Bearer " + bot.APIKey}})
 	replayed := readEvent(t, replaySocket)
 	replaySocket.CloseNow()
-	if bodyOf(replayed) != "Hello Michael" {
+	if bodyOf(replayed) != "  Hello @Hector **please**  " {
 		t.Fatalf("replayed event = %#v", replayed)
 	}
 	messagesResponse := requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", "", nil)
 	var messages []map[string]any
 	decodeResponse(t, messagesResponse, http.StatusOK, &messages)
-	if len(messages) != 2 || messages[0]["body"] != "  Hello **Hector**  " || messages[1]["body"] != "Hello Michael" {
+	if len(messages) != 2 || messages[0]["body"] != "  Hello @Hector **please**  " || messages[1]["body"] != "Hello Michael" {
 		t.Fatalf("persisted messages = %#v", messages)
 	}
 	latestResponse := requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages?limit=1", "", "", nil)
@@ -374,7 +374,7 @@ func TestBDD_MichaelAndHectorExchangePersistentRealtimeMessagesAndRevocationSurv
 	previousResponse := requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages?limit=1&before="+before, "", "", nil)
 	var previous []map[string]any
 	decodeResponse(t, previousResponse, http.StatusOK, &previous)
-	if len(previous) != 1 || previous[0]["body"] != "  Hello **Hector**  " {
+	if len(previous) != 1 || previous[0]["body"] != "  Hello @Hector **please**  " {
 		t.Fatalf("previous page = %#v", previous)
 	}
 	unreadResponse := requestJSON(t, client, http.MethodGet, server.URL+fmt.Sprintf("/api/conversations/%s/messages?limit=100&after_sequence=%d", boot.ConversationID, humanSequence), "", "", nil)
@@ -658,7 +658,7 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 	}
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
 	decodeResponse(t, requestJSON(t, http.DefaultClient, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", bot.APIKey, map[string]any{"body": "Keep this attribution", "client_id": "before-removal"}), http.StatusCreated, &map[string]any{})
-	var privateConversation map[string]string
+	var privateConversation map[string]any
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "private", "visibility": "members", "member_ids": []string{bot.ID}}), http.StatusCreated, &privateConversation)
 
 	var passwordHash string

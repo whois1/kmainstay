@@ -10,4 +10,11 @@ describe('safe Markdown', () => {
     expect(html).toContain('href="https://example.com"')
     expect(html).toContain('rel="noopener noreferrer"')
   })
+
+  it('styles only server-recognised mentions without weakening HTML safety', () => {
+    const html = renderMarkdown('Hello @Hector <script>alert(1)</script>', [{ id: 'bot', name: 'Hector' }])
+    expect(html).toContain('<span class="mention" data-user-id="bot">@Hector</span>')
+    expect(html).toContain('&lt;script&gt;')
+    expect(html).not.toContain('<script>')
+  })
 })

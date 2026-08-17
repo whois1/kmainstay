@@ -205,7 +205,8 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
 		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=om.user_id
@@ -218,10 +219,12 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, name, visibility string
+		var id, name, visibility, memberIDsJSON string
 		var readSequence, latestSequence int64
-		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence) == nil {
-			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "read_sequence": readSequence, "latest_sequence": latestSequence})
+		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &memberIDsJSON) == nil {
+			var memberIDs []string
+			_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -297,7 +300,18 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		returnServerError(w)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "name": in.Name, "visibility": in.Visibility})
+	returnedMemberIDs := []string{}
+	if in.Visibility == "members" {
+		returnedMemberIDs = append(returnedMemberIDs, p.ID)
+		seen := map[string]bool{p.ID: true}
+		for _, memberID := range in.MemberIDs {
+			if !seen[memberID] {
+				returnedMemberIDs = append(returnedMemberIDs, memberID)
+				seen[memberID] = true
+			}
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs})
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
@@ -628,15 +642,16 @@ func (s *server) replaceBotKey(w http.ResponseWriter, r *http.Request, revokeOnl
 }
 
 type message struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id"`
-	AuthorID       string `json:"author_id"`
-	AuthorName     string `json:"author_name"`
-	AuthorKind     string `json:"author_kind"`
-	Body           string `json:"body"`
-	ClientID       string `json:"client_id,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	Sequence       int64  `json:"sequence"`
+	ID             string          `json:"id"`
+	ConversationID string          `json:"conversation_id"`
+	AuthorID       string          `json:"author_id"`
+	AuthorName     string          `json:"author_name"`
+	AuthorKind     string          `json:"author_kind"`
+	Body           string          `json:"body"`
+	ClientID       string          `json:"client_id,omitempty"`
+	CreatedAt      string          `json:"created_at"`
+	Sequence       int64           `json:"sequence"`
+	Mentions       []mentionedUser `json:"mentions"`
 }
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
@@ -700,6 +715,14 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 		var m message
 		if rows.Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence) == nil {
 			items = append(items, m)
+		}
+	}
+	rows.Close()
+	for index := range items {
+		items[index].Mentions, err = s.messageMentions(r.Context(), items[index].ID)
+		if err != nil {
+			returnServerError(w)
+			return
 		}
 	}
 	writeJSON(w, 200, items)
@@ -802,7 +825,7 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 		return message{}, false, err
 	}
 	defer tx.Rollback()
-	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText()}
+	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText(), Mentions: []mentionedUser{}}
 	result, insertErr := tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at)
 		SELECT ?,c.id,?,?,nullif(?,''),?
 		FROM conversations c
@@ -826,6 +849,10 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 				WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?
 				AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
 			if e == nil {
+				existing.Mentions, e = messageMentionsInTransaction(ctx, tx, existing.ID)
+				if e != nil {
+					return message{}, false, e
+				}
 				return existing, false, nil
 			}
 			if !errors.Is(e, sql.ErrNoRows) {
@@ -844,6 +871,55 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 	var orgID string
 	if err = tx.QueryRowContext(ctx, `SELECT organisation_id FROM conversations WHERE id=?`, conversationID).Scan(&orgID); err != nil {
 		return message{}, false, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT users.id,users.name FROM users
+		JOIN organisation_memberships membership ON membership.user_id=users.id
+		WHERE membership.organisation_id=?`, orgID)
+	if err != nil {
+		return message{}, false, err
+	}
+	var candidates []mentionCandidate
+	for rows.Next() {
+		var candidate mentionCandidate
+		if err = rows.Scan(&candidate.ID, &candidate.Name); err != nil {
+			rows.Close()
+			return message{}, false, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return message{}, false, err
+	}
+	rows.Close()
+	m.Mentions = mentionedUsers(body, candidates)
+	for _, mention := range m.Mentions {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO message_mentions(message_id,user_id,name) VALUES(?,?,?)`, m.ID, mention.ID, mention.Name); err != nil {
+			return message{}, false, err
+		}
+	}
+	if p.Kind == "human" {
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO message_bot_deliveries(message_id,user_id)
+			SELECT ?,mention.user_id
+			FROM message_mentions mention
+			JOIN users target ON target.id=mention.user_id AND target.kind='bot'
+			JOIN conversations conversation ON conversation.id=?
+			WHERE mention.message_id=?
+			AND (conversation.visibility='organisation' OR EXISTS(
+				SELECT 1 FROM conversation_members member
+				WHERE member.conversation_id=conversation.id AND member.user_id=target.id))`, m.ID, conversationID, m.ID); err != nil {
+			return message{}, false, err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO message_bot_deliveries(message_id,user_id)
+			SELECT ?,target_member.user_id
+			FROM conversations conversation
+			JOIN conversation_members target_member ON target_member.conversation_id=conversation.id AND target_member.user_id<>?
+			JOIN users target ON target.id=target_member.user_id AND target.kind='bot'
+			WHERE conversation.id=? AND conversation.visibility='members'
+			AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=conversation.id)=2
+			AND EXISTS(SELECT 1 FROM conversation_members author_member WHERE author_member.conversation_id=conversation.id AND author_member.user_id=?)`, m.ID, p.ID, conversationID, p.ID); err != nil {
+			return message{}, false, err
+		}
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,?,?,?,?)`, database.NewID("evt"), orgID, conversationID, m.ID, m.CreatedAt)
 	if err != nil {
@@ -864,7 +940,39 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 func (s *server) messageByClient(ctx context.Context, conversationID, authorID, clientID string) (message, error) {
 	var m message
 	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?`, conversationID, authorID, clientID).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
+	if err == nil {
+		m.Mentions, err = s.messageMentions(ctx, m.ID)
+	}
 	return m, err
+}
+
+func (s *server) messageMentions(ctx context.Context, messageID string) ([]mentionedUser, error) {
+	return queryMessageMentions(ctx, s.db, messageID)
+}
+
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func messageMentionsInTransaction(ctx context.Context, tx *sql.Tx, messageID string) ([]mentionedUser, error) {
+	return queryMessageMentions(ctx, tx, messageID)
+}
+
+func queryMessageMentions(ctx context.Context, queryable queryer, messageID string) ([]mentionedUser, error) {
+	rows, err := queryable.QueryContext(ctx, `SELECT user_id,name FROM message_mentions WHERE message_id=? ORDER BY rowid`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	mentions := []mentionedUser{}
+	for rows.Next() {
+		var mention mentionedUser
+		if err := rows.Scan(&mention.ID, &mention.Name); err != nil {
+			return nil, err
+		}
+		mentions = append(mentions, mention)
+	}
+	return mentions, rows.Err()
 }
 
 func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
@@ -880,7 +988,7 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 	defer c.CloseNow()
 	ctx := c.CloseRead(r.Context())
 	send := func(seq int64) error {
-		m, err := s.eventFor(ctx, seq, p.ID)
+		m, err := s.eventFor(ctx, seq, p)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -893,21 +1001,7 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	lastDelivered := after
 	replay := func() error {
-		rows, err := s.db.QueryContext(ctx, `SELECT e.sequence FROM realtime_events e JOIN conversations c ON c.id=e.conversation_id JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=? WHERE e.sequence>? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)) ORDER BY e.sequence`, p.ID, lastDelivered, p.ID)
-		if err != nil {
-			return err
-		}
-		var sequences []int64
-		for rows.Next() {
-			var seq int64
-			if err := rows.Scan(&seq); err != nil {
-				rows.Close()
-				return err
-			}
-			sequences = append(sequences, seq)
-		}
-		err = rows.Err()
-		rows.Close()
+		sequences, err := s.eligibleEventSequences(ctx, p, lastDelivered)
 		if err != nil {
 			return err
 		}
@@ -947,9 +1041,46 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) eventFor(ctx context.Context, seq int64, userID string) (message, error) {
+const botDeliveryCondition = `(target.kind!='bot' OR (author.kind='human' AND EXISTS(
+	SELECT 1 FROM message_bot_deliveries delivery WHERE delivery.message_id=m.id AND delivery.user_id=target.id
+)))`
+
+func (s *server) eligibleEventSequences(ctx context.Context, target principal, after int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT e.sequence FROM realtime_events e
+		JOIN messages m ON m.id=e.message_id
+		JOIN users author ON author.id=m.author_id
+		JOIN conversations c ON c.id=e.conversation_id
+		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
+		JOIN users target ON target.id=om.user_id
+		WHERE e.sequence>? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=target.id))
+		AND `+botDeliveryCondition+` ORDER BY e.sequence`, target.ID, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sequences []int64
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			return nil, err
+		}
+		sequences = append(sequences, sequence)
+	}
+	return sequences, rows.Err()
+}
+
+func (s *server) eventFor(ctx context.Context, seq int64, target principal) (message, error) {
 	var m message
-	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence FROM realtime_events e JOIN messages m ON m.id=e.message_id JOIN users u ON u.id=m.author_id JOIN conversations c ON c.id=m.conversation_id JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=? WHERE e.sequence=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, userID, seq, userID).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,author.name,author.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence
+		FROM realtime_events e JOIN messages m ON m.id=e.message_id JOIN users author ON author.id=m.author_id
+		JOIN conversations c ON c.id=m.conversation_id
+		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
+		JOIN users target ON target.id=om.user_id
+		WHERE e.sequence=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=target.id))
+		AND `+botDeliveryCondition, target.ID, seq).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
+	if err == nil {
+		m.Mentions, err = s.messageMentions(ctx, m.ID)
+	}
 	return m, err
 }
 

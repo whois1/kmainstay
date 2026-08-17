@@ -77,4 +77,6 @@ KMAINSTAY_URL=http://localhost:8080 KMAINSTAY_API_KEY=km_live_replace_me \
 
 Run a real isolated server/bot/human exchange with `./scripts/local-reference-exchange.sh`. See [docs/api.md](docs/api.md) for endpoint and JSON schemas.
 
+In a private conversation containing only you and one bot, the bot receives your messages automatically. In organisation or larger private conversations, use `@Bot Name`; the composer suggests organisation members and bots as you type.
+
 No human invitations, files, threads, reactions, streaming, activity view, permissions system, native apps, or central brain yet.

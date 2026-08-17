@@ -9,7 +9,7 @@ const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.
 
 describe('K-Mainstay UI', () => {
   it('declares one dark colour scheme without exposing a theme control', async () => {
-    const wrapper = mount(App, { global: { provide: { fetcher: loadedFetcher(), socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(loadedFetcher()), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     expect(document.documentElement.dataset.theme).toBe('dark')
@@ -32,7 +32,7 @@ describe('K-Mainstay UI', () => {
   it('names the persistent navigation and active product surface', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     expect(wrapper.get('aside[aria-label="Workspace navigation"]')).toBeTruthy()
@@ -45,7 +45,7 @@ describe('K-Mainstay UI', () => {
   })
 
   it('gives the compact delete control a complete accessible name', async () => {
-    const wrapper = mount(App, { global: { provide: { fetcher: loadedFetcher(), socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(loadedFetcher()), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     const deleteButton = wrapper.get('[data-testid=delete-conversation]')
@@ -56,7 +56,7 @@ describe('K-Mainstay UI', () => {
   it('contains modal focus, closes with Escape and restores the opener', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }]))
-    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     const opener = wrapper.get('[data-testid=new-conversation]')
@@ -87,7 +87,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
       .mockImplementationOnce(() => json([]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     expect(wrapper.get('h1').text()).toBe('Welcome back')
     await wrapper.get('input[type=email]').setValue('michael@example.com')
@@ -111,7 +111,7 @@ describe('K-Mainstay UI', () => {
 	  .mockImplementationOnce(() => json({ sequence: 2 }))
       .mockImplementationOnce(() => json({ id: 'm3', author_name: 'Michael', author_kind: 'human', body: 'Next', created_at: '2026-01-01T00:00:02Z', sequence: 3 }, 201))
 	  .mockImplementationOnce(() => json({ sequence: 3 }))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     const messages = wrapper.findAll('[data-testid=message]')
     expect(messages[0].text()).toContain('Michael')
@@ -133,7 +133,7 @@ describe('K-Mainstay UI', () => {
 	  .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1 }]))
 	  .mockImplementationOnce(() => json(messagesForReadTest()))
 	  .mockImplementationOnce(() => json({ sequence: 2 }))
-	mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+	mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
 	await flushPromises()
 
 	expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/read', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ sequence: 2 }) }))
@@ -151,7 +151,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/messages?limit=100&before=m3', undefined)
@@ -170,7 +170,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     expect(wrapper.findAll('[data-testid=message]').map(message => message.attributes('data-message-id'))).toEqual(['m3'])
@@ -192,7 +192,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c2/messages?limit=100') return json([])
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     await wrapper.findAll('nav button')[1].trigger('click')
@@ -218,7 +218,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ sequence: 101 }))
       .mockImplementationOnce(() => json(latestPage))
       .mockImplementationOnce(() => json({ sequence: 201 }))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/messages?limit=100&after_sequence=1', undefined)
@@ -266,7 +266,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c2/read') return json({ sequence: 101 })
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     const selection = wrapper.findAll('nav button')[1].trigger('click')
@@ -308,7 +308,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c2/read') return json({ sequence: 3 })
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     await wrapper.findAll('nav button')[1].trigger('click')
@@ -346,7 +346,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/conversations/c1/read') return json({ sequence: 202 })
       throw new Error(`Unexpected request: ${url}`)
     })
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     await wrapper.get('[data-testid=jump-to-bottom]').trigger('click')
@@ -366,7 +366,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
       .mockImplementationOnce(() => json({ id: 'b1', name: 'Hector', kind: 'bot', role: 'member', api_key: 'km_live_lookup_secret' }, 201))
     Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
-    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { attachTo: document.body, global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -390,7 +390,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }]))
     fetcher.mockImplementationOnce(() => json({ id: 'c2', name: 'Planning', visibility: 'members' }, 201))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=new-conversation]').trigger('click')
     await flushPromises()
@@ -414,7 +414,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
       .mockImplementationOnce(() => json([]))
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     await wrapper.get('[data-testid=delete-conversation]').trigger('click')
@@ -431,7 +431,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
     await wrapper.get('[data-testid=delete-conversation]').trigger('click')
@@ -465,7 +465,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([message]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 2 }))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     EventSocket.instance.onopen?.()
@@ -495,7 +495,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ sequence: 2 }))
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     EventSocket.instance.onopen?.()
@@ -531,7 +531,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => staleRefresh)
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => deletionRefresh)
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     EventSocket.instance.onopen?.()
@@ -569,7 +569,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ error: 'List unavailable' }, 500))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
@@ -604,7 +604,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'm3', conversation_id: 'c3', author_name: 'Michael', author_kind: 'human', body: 'Delivery message', created_at: '2026-01-01T00:00:03Z', sequence: 3 }]))
       .mockImplementationOnce(() => json([{ id: 'c3', name: 'delivery', visibility: 'organisation' }]))
       .mockImplementationOnce(() => json([{ id: 'c3', name: 'delivery', visibility: 'organisation' }]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'c1' } }) } as MessageEvent)
@@ -640,7 +640,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => sendResponse)
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json([{ id: 'c2', name: 'planning', visibility: 'organisation' }]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
     await wrapper.get('textarea').setValue('Late general message')
@@ -661,7 +661,7 @@ describe('K-Mainstay UI', () => {
       { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
       { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
     ]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     expect(wrapper.get('[data-testid=organisation-brand]').element.tagName).toBe('DIV')
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
@@ -684,7 +684,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
       .mockImplementationOnce(() => json([{ id: 'u3', name: 'Casey', email: 'casey@example.com' }]))
       .mockImplementationOnce(() => json({ id: 'u3', kind: 'human', name: 'Casey', role: 'member' }, 201))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -704,7 +704,7 @@ describe('K-Mainstay UI', () => {
   it('shows a settings load failure instead of silently doing nothing', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json({ error: 'Roster unavailable' }, 500))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -717,7 +717,7 @@ describe('K-Mainstay UI', () => {
     fetcher
       .mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
       .mockImplementationOnce(() => json([]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -734,7 +734,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json([{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -756,7 +756,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => rotation)
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -796,7 +796,7 @@ describe('K-Mainstay UI', () => {
         { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
       ]))
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
-    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
     await flushPromises()
@@ -818,6 +818,17 @@ function cssRule(selector: string) {
   expect(ruleStart).toBeGreaterThan(selectorStart)
   expect(ruleEnd).toBeGreaterThan(ruleStart)
   return styles.slice(ruleStart + 1, ruleEnd)
+}
+
+function withInitialUsers(fetcher: ReturnType<typeof vi.fn>) {
+  let initialUsersLoaded = false
+  return vi.fn((url: string, init?: RequestInit) => {
+    if (!initialUsersLoaded && /\/api\/organisations\/[^/]+\/users$/.test(url)) {
+      initialUsersLoaded = true
+      return json([])
+    }
+    return fetcher(url, init)
+  })
 }
 
 function loadedFetcher() {

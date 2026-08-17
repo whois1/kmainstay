@@ -23,15 +23,40 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "messages", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
+	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "messages", "message_mentions", "message_bot_deliveries", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
 		var got string
 		if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&got); err != nil {
 			t.Errorf("missing table %s: %v", table, err)
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
+	}
+}
+
+func TestOpen_MessageMentionsSurviveMentionedUserDeletion(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "mention-history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, statement := range []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','` + now + `')`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('author','bot','Author','` + now + `'),('mentioned','bot','Hector','` + now + `')`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('conversation','org','General','organisation','` + now + `')`,
+		`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message','conversation','author','@Hector','` + now + `')`,
+		`INSERT INTO message_mentions(message_id,user_id,name) VALUES('message','mentioned','Hector')`,
+		`DELETE FROM users WHERE id='mentioned'`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM message_mentions WHERE message_id='message'`).Scan(&name); err != nil || name != "Hector" {
+		t.Fatalf("preserved mention name = %q, err=%v", name, err)
 	}
 }
 
@@ -210,7 +235,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 4 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 5 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string

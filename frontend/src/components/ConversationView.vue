@@ -1,17 +1,86 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { renderMarkdown } from '../markdown'
-import type { Conversation, Message } from '../types'
+import type { Conversation, Message, User } from '../types'
 
-const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; busy: boolean; error: string; canDelete: boolean; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
+const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; busy: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
 const emit = defineEmits<{ deleteConversation: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const showJumpToBottom = ref(false)
+const textarea = ref<HTMLTextAreaElement | null>(null)
+const draft = ref(props.composer)
+const mentionStart = ref<number | null>(null)
+const mentionQuery = ref('')
+const activeSuggestion = ref(0)
+const pickerOpen = ref(false)
+const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
+const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
+const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
+const directBot = computed(() => {
+  if (props.selected?.visibility !== 'members' || props.selected.member_ids?.length !== 2) return null
+  const otherID = props.selected.member_ids.find(id => id !== props.currentUserID)
+  return (props.users ?? []).find(user => user.id === otherID && user.kind === 'bot') ?? null
+})
 let capturedConversationID: string | null = null
 let initiallyPositioned = false
 let positionedMessageCount = 0
+
+watch(() => props.composer, value => { draft.value = value })
+watch(() => props.selected?.id, () => closeMentionPicker())
+
+function updateComposer(event: Event) {
+  const element = event.target as HTMLTextAreaElement
+  draft.value = element.value
+  emit('update:composer', element.value)
+  updateMentionPicker(element)
+}
+
+function updateMentionPicker(element: HTMLTextAreaElement) {
+  const caret = element.selectionStart
+  const beforeCaret = element.value.slice(0, caret)
+  const at = beforeCaret.lastIndexOf('@')
+  if (at < 0 || (at > 0 && /[\p{L}\p{N}\p{M}_]/u.test(beforeCaret[at - 1])) || /[\n\r]/.test(beforeCaret.slice(at + 1))) { closeMentionPicker(); return }
+  mentionStart.value = at
+  mentionQuery.value = beforeCaret.slice(at + 1)
+  activeSuggestion.value = 0
+  pickerOpen.value = true
+}
+
+function handleComposerKeydown(event: KeyboardEvent) {
+	const plainEnter = event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing
+  if (!pickerOpen.value) {
+    if (plainEnter) { event.preventDefault(); emit('sendMessage') }
+    return
+  }
+  if (event.key === 'Escape') { event.preventDefault(); closeMentionPicker(); return }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (!suggestions.value.length) return
+    const change = event.key === 'ArrowDown' ? 1 : -1
+    activeSuggestion.value = (activeSuggestion.value + change + suggestions.value.length) % suggestions.value.length
+    return
+  }
+  if (plainEnter && suggestions.value[activeSuggestion.value]) { event.preventDefault(); selectMention(suggestions.value[activeSuggestion.value]); return }
+  if (plainEnter) { event.preventDefault(); emit('sendMessage') }
+}
+
+async function selectMention(user: User) {
+  if (mentionStart.value === null || !textarea.value) return
+  const caret = textarea.value.selectionStart
+  const inserted = `@${user.name} `
+  const value = draft.value.slice(0, mentionStart.value) + inserted + draft.value.slice(caret)
+  const nextCaret = mentionStart.value + inserted.length
+  draft.value = value
+  emit('update:composer', value)
+  closeMentionPicker()
+  await nextTick()
+  textarea.value?.focus()
+  textarea.value?.setSelectionRange(nextCaret, nextCaret)
+}
+
+function closeMentionPicker() { pickerOpen.value = false; mentionStart.value = null; mentionQuery.value = ''; activeSuggestion.value = 0 }
 
 watch(() => [props.selected?.id, props.selected?.read_sequence, props.messages] as const, async ([conversationID, , messages]) => {
   if (conversationID !== capturedConversationID) {
@@ -115,14 +184,19 @@ function handleScroll() {
       <div v-if="message.id === firstUnreadMessageID" data-testid="new-messages-divider" class="new-messages-divider" role="separator" aria-label="New messages"><span>New messages</span></div>
       <article data-testid="message" :data-message-id="message.id">
         <div class="avatar" :class="{ bot: message.author_kind === 'bot' }">{{ message.author_name.slice(0, 1) }}</div>
-        <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></div><div class="markdown" v-html="renderMarkdown(message.body)" /></div>
+        <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></div><div class="markdown" v-html="renderMarkdown(message.body, message.mentions)" /></div>
       </article>
       </template>
     </div>
     <button v-if="showJumpToBottom" data-testid="jump-to-bottom" class="jump-to-bottom" type="button" aria-label="Jump to latest message" @click="jumpToBottom">↓</button>
     <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')">
-      <textarea :value="composer" :placeholder="`Message #${selected.name}`" rows="1" aria-label="Message" @input="$emit('update:composer', ($event.target as HTMLTextAreaElement).value)" @keydown.enter.exact.prevent="$emit('sendMessage')" />
-      <button :disabled="busy || !composer.trim()" aria-label="Send message">Send</button><small>Markdown supported · Enter to send</small>
+      <div class="composer-input"><textarea ref="textarea" :value="draft" :placeholder="`Message #${selected.name}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" />
+        <ul v-if="pickerVisible" id="mention-suggestions" class="mention-picker" role="listbox" aria-label="Mention a person or bot">
+          <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
+        </ul>
+      </div>
+      <button :disabled="busy || !draft.trim()" aria-label="Send message">Send</button><small>Markdown supported · Enter to send</small>
+      <small v-if="(users ?? []).some(user => user.kind === 'bot')" data-testid="bot-guidance">{{ directBot ? `${directBot.name} responds automatically in this private chat.` : 'Bots respond when you @mention them.' }}</small>
     </form>
     <p v-if="error" class="toast error" role="alert">{{ error }}</p>
   </section>

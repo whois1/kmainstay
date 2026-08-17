@@ -25,6 +25,9 @@ var canonicalNamesMigration string
 //go:embed migrations/004_conversation_read_positions.sql
 var conversationReadPositionsMigration string
 
+//go:embed migrations/005_message_mentions.sql
+var messageMentionsMigration string
+
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -95,6 +98,17 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 4: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(4,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=5`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(messageMentionsMigration); err != nil {
+			return fmt.Errorf("migration 5: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(5,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}
