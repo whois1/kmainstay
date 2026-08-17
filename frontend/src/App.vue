@@ -46,10 +46,17 @@ const showAddExisting = ref(false)
 const memberIDs = ref<string[]>([])
 let conversationRefreshGeneration = 0
 let conversationSelectionGeneration = 0
+let messageLoadGeneration = 0
+let loadingConversationID: string | null = null
+let pendingRealtimeMessages: Message[] = []
 
 const realtime = useRealtime((message) => {
   const conversation = conversations.value.find(({ id }) => id === message.conversation_id)
   if (conversation) conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
+  if (message.conversation_id === loadingConversationID) {
+    if (!pendingRealtimeMessages.some(({ id }) => id === message.id)) pendingRealtimeMessages.push(message)
+    return
+  }
   if (message.conversation_id === selected.value?.id && !hasNewerMessages.value && !messages.value.some(({ id }) => id === message.id)) {
     messages.value.push(message)
   }
@@ -92,18 +99,38 @@ async function login() {
 
 async function selectConversation(conversation: Conversation) {
   const selectionGeneration = ++conversationSelectionGeneration
+  const loadGeneration = ++messageLoadGeneration
   selected.value = conversation
   messages.value = []
   hasNewerMessages.value = false
+  loadingConversationID = conversation.id
+  pendingRealtimeMessages = []
   const readSequence = conversation.read_sequence ?? 0
   const latestSequence = conversation.latest_sequence ?? readSequence
   const messageURL = latestSequence > readSequence
     ? `/api/conversations/${conversation.id}/messages?limit=100&after_sequence=${readSequence}`
     : `/api/conversations/${conversation.id}/messages?limit=100`
-  const selectedMessages = await request<Message[]>(messageURL)
+  let selectedMessages: Message[]
+  try {
+    selectedMessages = await request<Message[]>(messageURL)
+  } catch (cause) {
+    if (loadGeneration === messageLoadGeneration) {
+      loadingConversationID = null
+      pendingRealtimeMessages = []
+    }
+    throw cause
+  }
   if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
-  messages.value = selectedMessages
-  hasNewerMessages.value = Boolean(selectedMessages.length && selectedMessages.at(-1)!.sequence < latestSequence)
+  const realtimeMessages = loadGeneration === messageLoadGeneration ? pendingRealtimeMessages : []
+  if (loadGeneration === messageLoadGeneration) {
+    loadingConversationID = null
+    pendingRealtimeMessages = []
+  }
+  const currentLatestSequence = conversations.value.find(({ id }) => id === conversation.id)?.latest_sequence ?? latestSequence
+  const fetchedLatestSequence = selectedMessages.at(-1)?.sequence ?? readSequence
+  const boundedPageMayHaveGap = selectedMessages.length === 100 && fetchedLatestSequence < currentLatestSequence
+  messages.value = boundedPageMayHaveGap ? selectedMessages : mergeMessages(selectedMessages, realtimeMessages)
+  hasNewerMessages.value = (messages.value.at(-1)?.sequence ?? readSequence) < currentLatestSequence
   realtime.seed(messages.value)
   activeView.value = 'chat'
 }
@@ -112,16 +139,32 @@ async function jumpToLatest() {
   const conversation = selected.value
   if (!conversation || !hasNewerMessages.value) return
   const selectionGeneration = conversationSelectionGeneration
+  const loadGeneration = ++messageLoadGeneration
+  loadingConversationID = conversation.id
+  pendingRealtimeMessages = []
   try {
     const latestMessages = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
     if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id) return
-    messages.value = latestMessages
-    hasNewerMessages.value = false
+    const realtimeMessages = loadGeneration === messageLoadGeneration ? pendingRealtimeMessages : []
+    messages.value = mergeMessages(latestMessages, realtimeMessages)
+    const currentLatestSequence = conversations.value.find(({ id }) => id === conversation.id)?.latest_sequence ?? conversation.latest_sequence ?? 0
+    hasNewerMessages.value = (messages.value.at(-1)?.sequence ?? 0) < currentLatestSequence
     realtime.seed(messages.value)
     jumpToLatestVersion.value++
   } catch (cause) {
     if (selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversation.id) error.value = messageOf(cause)
+  } finally {
+    if (loadGeneration === messageLoadGeneration) {
+      loadingConversationID = null
+      pendingRealtimeMessages = []
+    }
   }
+}
+
+function mergeMessages(loadedMessages: Message[], realtimeMessages: Message[]) {
+  const messagesByID = new Map(loadedMessages.map(message => [message.id, message]))
+  for (const message of realtimeMessages) messagesByID.set(message.id, message)
+  return [...messagesByID.values()].sort((left, right) => left.sequence - right.sequence)
 }
 
 async function sendMessage() {

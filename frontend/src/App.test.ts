@@ -171,6 +171,82 @@ describe('K-Mainstay UI', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/read', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ sequence: 201 }) }))
   })
 
+  it('merges realtime arrivals that occur during conversation selection', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    let finishPlanningMessages!: (response: Response) => void
+    const planningMessages = new Promise<Response>(resolve => { finishPlanningMessages = resolve })
+    const fetchedMessage = { id: 'm2', conversation_id: 'c2', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: 'Fetched', created_at: '2026-01-01T00:00:01Z', sequence: 2 }
+    const realtimeMessage = { ...fetchedMessage, id: 'm3', body: 'Realtime', created_at: '2026-01-01T00:00:02Z', sequence: 3 }
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+        { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/conversations/c2/messages?limit=100&after_sequence=1') return planningMessages
+      if (url === '/api/conversations/c2/read') return json({ sequence: 3 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    await wrapper.findAll('nav button')[1].trigger('click')
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 3, payload: realtimeMessage }) } as MessageEvent)
+    finishPlanningMessages(await json([fetchedMessage]))
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid=message]').map(message => message.attributes('data-message-id'))).toEqual(['m2', 'm3'])
+    expect(wrapper.text()).toContain('Realtime')
+  })
+
+  it('merges realtime arrivals that occur while jumping to latest', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const unreadPage = Array.from({ length: 100 }, (_, index) => ({
+      id: `m${index + 2}`, conversation_id: 'c1', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: `Message ${index + 2}`, created_at: '2026-01-01T00:00:00Z', sequence: index + 2,
+    }))
+    const latestPage = Array.from({ length: 100 }, (_, index) => ({ ...unreadPage[index], id: `m${index + 102}`, body: `Message ${index + 102}`, sequence: index + 102 }))
+    const realtimeMessage = { ...latestPage[99], id: 'm202', body: 'Realtime 202', sequence: 202 }
+    let finishLatestMessages!: (response: Response) => void
+    const latestMessages = new Promise<Response>(resolve => { finishLatestMessages = resolve })
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 }])
+      if (url === '/api/conversations/c1/messages?limit=100&after_sequence=1') return json(unreadPage)
+      if (url === '/api/conversations/c1/messages?limit=100') return latestMessages
+      if (url === '/api/conversations/c1/read') return json({ sequence: 202 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    await wrapper.get('[data-testid=jump-to-bottom]').trigger('click')
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 202, payload: realtimeMessage }) } as MessageEvent)
+    finishLatestMessages(await json(latestPage))
+    await flushPromises()
+
+    const renderedMessages = wrapper.findAll('[data-testid=message]')
+    expect(renderedMessages[renderedMessages.length - 1]?.attributes('data-message-id')).toBe('m202')
+    expect(wrapper.text()).toContain('Realtime 202')
+    expect(wrapper.find('[data-testid=jump-to-bottom]').exists()).toBe(false)
+  })
+
   it('creates a bot and presents its API key once with copy warning', async () => {
     const fetcher = loadedFetcher()
     fetcher
