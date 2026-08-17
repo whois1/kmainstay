@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import type { Conversation, Organisation, Principal } from '../types'
+import { computed } from 'vue'
+import type { Conversation, Organisation, Principal, User } from '../types'
 
-defineProps<{
+const props = defineProps<{
   organisation: Organisation | null
   principal: Principal
   conversations: Conversation[]
+  users: User[]
   selected: Conversation | null
   settingsActive: boolean
 }>()
@@ -14,6 +16,23 @@ defineEmits<{
   newConversation: []
   selectConversation: [conversation: Conversation]
 }>()
+
+function byLatestMessage(left: Conversation, right: Conversation) {
+  return (right.latest_sequence ?? 0) - (left.latest_sequence ?? 0) || left.name.localeCompare(right.name)
+}
+
+const pinnedConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'organisation').sort(byLatestMessage))
+const directConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestMessage))
+const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length !== 2).sort(byLatestMessage))
+
+function directUser(conversation: Conversation) {
+  const otherUserID = conversation.member_ids?.find(userID => userID !== props.principal.id)
+  return props.users.find(user => user.id === otherUserID)
+}
+
+function isCurrentConversation(conversation: Conversation) {
+  return !props.settingsActive && props.selected?.id === conversation.id
+}
 </script>
 
 <template>
@@ -26,10 +45,26 @@ defineEmits<{
       </button>
     </div>
     <div class="side-heading"><span>Conversations</span><button data-testid="new-conversation" class="icon-button" aria-label="New private conversation" @click="$emit('newConversation')">＋</button></div>
-    <nav aria-label="Conversations">
-      <button v-for="conversation in conversations" :key="conversation.id" :class="{ active: selected?.id === conversation.id }" @click="$emit('selectConversation', conversation)">
-        <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span><small v-if="conversation.visibility === 'members'">private</small>
-      </button>
+    <nav class="sidebar-navigation" aria-label="Conversations">
+      <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
+        <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
+        <button v-for="conversation in pinnedConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+        </button>
+      </section>
+      <section data-testid="direct-conversations" aria-labelledby="direct-heading">
+        <h2 id="direct-heading" class="sidebar-section-heading" aria-label="Direct messages"><span aria-hidden="true">●</span><span>Direct messages</span></h2>
+        <button v-for="conversation in directConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+          <span class="direct-avatar" aria-hidden="true">{{ (directUser(conversation)?.name ?? conversation.name).slice(0, 1) }}</span>
+          <span class="conversation-label">{{ directUser(conversation)?.name ?? conversation.name }}</span><small v-if="directUser(conversation)?.kind === 'bot'">bot</small>
+        </button>
+      </section>
+      <section data-testid="group-conversations" aria-labelledby="group-heading">
+        <h2 id="group-heading" class="sidebar-section-heading" aria-label="Group chats"><span aria-hidden="true">◇</span><span>Group chats</span></h2>
+        <button v-for="conversation in groupConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+        </button>
+      </section>
     </nav>
     <div class="profile"><span>{{ principal.name.slice(0, 1) }}</span><div><strong>{{ principal.name }}</strong><small>Human</small></div></div>
   </aside>

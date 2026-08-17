@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 
@@ -22,8 +22,8 @@ describe('K-Mainstay UI', () => {
     expect(cssRule('.workspace')).toContain('overflow: hidden')
     expect(cssRule('aside')).toContain('min-height: 0')
     expect(cssRule('aside')).toContain('overflow: hidden')
-    expect(cssRule('nav')).toContain('min-height: 0')
-    expect(cssRule('nav')).toContain('overflow-y: auto')
+    expect(cssRule('.sidebar-navigation')).toContain('min-height: 0')
+    expect(cssRule('.sidebar-navigation')).toContain('overflow-y: auto')
     expect(cssRule('.conversation')).toContain('min-height: 0')
     expect(cssRule('.conversation')).toContain('overflow: hidden')
     expect(cssRule('.message-list')).toContain('overflow-y: auto')
@@ -195,7 +195,7 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    await wrapper.findAll('nav button')[1].trigger('click')
+    await conversationButton(wrapper, 'planning').trigger('click')
     await flushPromises()
     finishUnreadMessages(await json([unreadMessage]))
     await flushPromises()
@@ -269,7 +269,7 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
-    const selection = wrapper.findAll('nav button')[1].trigger('click')
+    const selection = conversationButton(wrapper, 'planning').trigger('click')
     await Promise.resolve()
     await Promise.resolve()
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 202, payload: realtimeMessage }) } as MessageEvent)
@@ -311,7 +311,7 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
 
-    await wrapper.findAll('nav button')[1].trigger('click')
+    await conversationButton(wrapper, 'planning').trigger('click')
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 3, payload: realtimeMessage }) } as MessageEvent)
     finishPlanningMessages(await json([fetchedMessage]))
     await flushPromises()
@@ -440,7 +440,7 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('No conversations')
     expect(wrapper.text()).not.toContain('# Choose a conversation')
     expect(wrapper.find('[data-testid=composer]').exists()).toBe(false)
-    expect(wrapper.find('nav button').exists()).toBe(false)
+    expect(wrapper.findAll('.sidebar-navigation section > button')).toHaveLength(0)
     confirm.mockRestore()
   })
 
@@ -818,6 +818,12 @@ function cssRule(selector: string) {
   expect(ruleStart).toBeGreaterThan(selectorStart)
   expect(ruleEnd).toBeGreaterThan(ruleStart)
   return styles.slice(ruleStart + 1, ruleEnd)
+}
+
+function conversationButton(wrapper: VueWrapper, name: string) {
+  const button = wrapper.findAll('.sidebar-navigation section > button').find(candidate => candidate.text().toLocaleLowerCase().includes(name.toLocaleLowerCase()))
+  expect(button, `Missing conversation button for ${name}`).toBeDefined()
+  return button!
 }
 
 function withInitialUsers(fetcher: ReturnType<typeof vi.fn>) {
