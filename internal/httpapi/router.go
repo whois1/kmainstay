@@ -63,6 +63,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("GET /api/organisations", s.withAuth(http.HandlerFunc(s.organisations)))
 		mux.Handle("GET /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.conversations)))
 		mux.Handle("POST /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.createConversation)))
+		mux.Handle("POST /api/organisations/{organisation}/direct-conversations/{user}", s.withAuth(http.HandlerFunc(s.directConversation)))
 		mux.Handle("DELETE /api/organisations/{organisation}/conversations/{conversation}", s.withAuth(http.HandlerFunc(s.deleteConversation)))
 		mux.Handle("GET /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.users)))
 		mux.Handle("POST /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.addOrganisationUser)))
@@ -312,6 +313,87 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs})
+}
+
+func (s *server) directConversation(w http.ResponseWriter, r *http.Request) {
+	p := current(r)
+	organisationID := r.PathValue("organisation")
+	otherUserID := r.PathValue("user")
+	if otherUserID == p.ID || !s.organisationMember(r.Context(), organisationID, p.ID) || !s.organisationMember(r.Context(), organisationID, otherUserID) {
+		writeError(w, http.StatusBadRequest, "direct conversation requires another organisation member")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, err := s.exactDirectConversation(r.Context(), organisationID, p.ID, otherUserID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, conversation)
+		return
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		returnServerError(w)
+		return
+	}
+
+	conversationID := database.NewID("con")
+	name := "direct:" + conversationID
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,?,?,'members',?)`, conversationID, organisationID, name, nowText()); err != nil {
+		returnServerError(w)
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `INSERT INTO conversation_members(conversation_id,user_id)
+		SELECT ?,user_id FROM organisation_memberships
+		WHERE organisation_id=? AND user_id IN (?,?)`, conversationID, organisationID, p.ID, otherUserID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	insertedMembers, err := result.RowsAffected()
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	if insertedMembers != 2 {
+		writeError(w, http.StatusBadRequest, "direct conversation requires another organisation member")
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		returnServerError(w)
+		return
+	}
+	conversation, err = s.exactDirectConversation(r.Context(), organisationID, p.ID, otherUserID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, conversation)
+}
+
+func (s *server) exactDirectConversation(ctx context.Context, organisationID, currentUserID, otherUserID string) (map[string]any, error) {
+	var id, name, visibility, memberIDsJSON string
+	var readSequence, latestSequence int64
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
+		FROM conversations c
+		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=?
+		WHERE c.organisation_id=? AND c.visibility='members'
+		AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=c.id)=2
+		AND EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=c.id AND member.user_id=?)
+		AND EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=c.id AND member.user_id=?)
+		ORDER BY coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0) DESC,c.created_at DESC,c.id DESC LIMIT 1`, currentUserID, organisationID, currentUserID, otherUserID).Scan(&id, &name, &visibility, &readSequence, &latestSequence, &memberIDsJSON)
+	if err != nil {
+		return nil, err
+	}
+	var memberIDs []string
+	_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
+	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence}, nil
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
@@ -830,7 +912,9 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 		SELECT ?,c.id,?,?,nullif(?,''),?
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
-		WHERE c.id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, m.ID, p.ID, body, clientID, m.CreatedAt, p.ID, conversationID, p.ID)
+		WHERE c.id=? AND (c.visibility='organisation' OR (
+			EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)
+			AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, m.ID, p.ID, body, clientID, m.CreatedAt, p.ID, conversationID, p.ID)
 	if insertErr == nil {
 		if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
 			return message{}, false, rowsErr
@@ -847,7 +931,9 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 				JOIN conversations c ON c.id=m.conversation_id
 				JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
 				WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?
-				AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
+				AND (c.visibility='organisation' OR (
+					EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)
+					AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
 			if e == nil {
 				existing.Mentions, e = messageMentionsInTransaction(ctx, tx, existing.ID)
 				if e != nil {

@@ -68,8 +68,8 @@ describe('K-Mainstay UI', () => {
     const input = wrapper.get('[data-testid=conversation-name]')
     expect(document.activeElement).toBe(input.element)
 
-    const submit = wrapper.get('[data-testid=create-conversation] button:not(.close)')
-    ;(submit.element as HTMLElement).focus()
+    const lastCheckbox = wrapper.findAll('[data-testid=create-conversation] input[type=checkbox]').at(-1)!
+    ;(lastCheckbox.element as HTMLElement).focus()
     await dialog.trigger('keydown', { key: 'Tab' })
     expect(document.activeElement).toBe(wrapper.get('[data-testid=create-conversation] .close').element)
 
@@ -386,20 +386,188 @@ describe('K-Mainstay UI', () => {
     wrapper.unmount()
   })
 
-  it('creates a private conversation with selected organisation users', async () => {
+  it('creates a named group chat only after at least two other users are selected', async () => {
     const fetcher = loadedFetcher()
-    fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }]))
-    fetcher.mockImplementationOnce(() => json({ id: 'c2', name: 'Planning', visibility: 'members' }, 201))
+    fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human' }, { id: 'b1', name: 'Hector', kind: 'bot' }, { id: 'u2', name: 'Mary', kind: 'human' }]))
+    fetcher.mockImplementationOnce(() => json({ id: 'c2', name: 'Planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] }, 201))
+    fetcher.mockImplementationOnce(() => json([]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=new-conversation]').trigger('click')
     await flushPromises()
+    expect(wrapper.get('.dialog-context').text()).toBe('New group chat')
+    expect(wrapper.get('#conversation-dialog-title').text()).toBe('Create group chat')
+    const submit = wrapper.get('[data-testid=create-conversation] button[type=submit]')
+    expect(submit.attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid=conversation-name]').setValue('Planning')
     await wrapper.get('input[value=b1]').setValue(true)
+    expect(submit.attributes('disabled')).toBeDefined()
+    await wrapper.get('input[value=u2]').setValue(true)
+    expect(submit.attributes('disabled')).toBeUndefined()
     await wrapper.get('[data-testid=create-conversation]').trigger('submit')
     await flushPromises()
-    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', expect.objectContaining({ body: JSON.stringify({ name: 'Planning', visibility: 'members', member_ids: ['b1'] }) }))
-    expect(wrapper.text()).toContain('Planning')
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', expect.objectContaining({ body: JSON.stringify({ name: 'Planning', visibility: 'members', member_ids: ['b1', 'u2'] }) }))
+    expect(wrapper.get('h1').text()).toContain('Planning')
+  })
+
+  it('shows one direct row for equal-sequence legacy pairs and opens the later source conversation', async () => {
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', latest_sequence: 0 },
+        { id: 'direct-old', name: 'Hector legacy', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 0 },
+        { id: 'direct-new', name: 'Another legacy title', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 0 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/direct-new/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const directRows = wrapper.findAll('[data-testid=direct-conversations] button')
+    expect(directRows).toHaveLength(1)
+    expect(directRows[0].text()).toContain('Hector')
+    expect(directRows[0].attributes('aria-current')).toBeUndefined()
+    await directRows[0].trigger('click')
+    await flushPromises()
+
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/direct-new/messages?limit=100', undefined)
+    expect(wrapper.get('h1').text()).toBe('Hector')
+    expect(directRows[0].attributes('aria-current')).toBe('page')
+  })
+
+  it('lazily creates and selects one direct conversation when a chatless user is clicked repeatedly', async () => {
+    let finishCreation!: (response: Response) => void
+    const pendingCreation = new Promise<Response>(resolve => { finishCreation = resolve })
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const directUser = conversationButton(wrapper, 'Hector')
+    await directUser.trigger('click')
+    await directUser.trigger('click')
+
+    const creationCalls = fetcher.mock.calls.filter(([url, init]) => url === '/api/organisations/o1/direct-conversations/b1' && init)
+    expect(creationCalls).toHaveLength(1)
+    expect(creationCalls[0]?.[1]).toEqual(expect.objectContaining({ method: 'POST' }))
+    expect(creationCalls[0]?.[1]?.body).toBeUndefined()
+
+    finishCreation(await json({ id: 'c2', name: 'Hector', visibility: 'members', member_ids: ['u1', 'b1'] }, 201))
+    await flushPromises()
+    expect(wrapper.get('h1').text()).toContain('Hector')
+    expect(directUser.attributes('aria-current')).toBe('page')
+  })
+
+  it('shows a direct-chat creation failure and lets the user retry', async () => {
+    let creationAttempts = 0
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/direct-conversations/b1') {
+        creationAttempts++
+        return creationAttempts === 1
+          ? json({ error: 'Could not start direct chat' }, 500)
+          : json({ id: 'c2', name: 'internal-name', visibility: 'members', member_ids: ['u1', 'b1'] }, 201)
+      }
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await conversationButton(wrapper, 'Hector').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('Could not start direct chat')
+
+    await conversationButton(wrapper, 'Hector').trigger('click')
+    await flushPromises()
+    expect(creationAttempts).toBe(2)
+    expect(wrapper.get('h1').text()).toBe('Hector')
+  })
+
+  it('does not let a delayed direct-chat response replace a newer conversation selection', async () => {
+    let finishCreation!: (response: Response) => void
+    const pendingCreation = new Promise<Response>(resolve => { finishCreation = resolve })
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ])
+      if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await conversationButton(wrapper, 'Hector').trigger('click')
+    await conversationButton(wrapper, 'planning').trigger('click')
+    await flushPromises()
+    finishCreation(await json({ id: 'c3', name: 'direct:u1:b1', visibility: 'members', member_ids: ['u1', 'b1'] }))
+    await flushPromises()
+
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    expect(conversationButton(wrapper, 'Hector').exists()).toBe(true)
+    expect(fetcher).not.toHaveBeenCalledWith('/api/conversations/c3/messages?limit=100', undefined)
+  })
+
+  it('does not show a delayed direct-chat failure after newer navigation', async () => {
+    let finishCreation!: (response: Response) => void
+    const pendingCreation = new Promise<Response>(resolve => { finishCreation = resolve })
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ])
+      if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await conversationButton(wrapper, 'Hector').trigger('click')
+    await conversationButton(wrapper, 'planning').trigger('click')
+    await flushPromises()
+    finishCreation(await json({ error: 'Could not start direct chat' }, 500))
+    await flushPromises()
+
+    expect(wrapper.get('h1').text()).toBe('# planning')
+    expect(conversationButton(wrapper, 'planning').attributes('aria-current')).toBe('page')
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
   })
 
   it('lets an admin delete the selected conversation for everyone', async () => {
@@ -424,6 +592,53 @@ describe('K-Mainstay UI', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
     expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
     expect(wrapper.get('h1').text()).toBe('# planning')
+    confirm.mockRestore()
+  })
+
+  it('names the other user when confirming direct-conversation deletion', async () => {
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'direct:u1:b1', visibility: 'members', member_ids: ['u1', 'b1'] }])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([
+        { id: 'u1', name: 'Michael', kind: 'human', role: 'admin' },
+        { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
+      ])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
+
+    expect(confirm).toHaveBeenCalledWith('Delete conversation with Hector? This removes its messages and nobody will be able to send to it.')
+    confirm.mockRestore()
+  })
+
+  it('presents a one-member private conversation as a removed direct conversation', async () => {
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'direct:u1:b1', visibility: 'members', member_ids: ['u1'] }])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([{ id: 'm1', conversation_id: 'c1', author_id: 'b1', author_name: 'Former bot', author_kind: 'bot', body: 'Historical message', created_at: '2026-01-01T00:00:00Z', sequence: 1 }])
+      if (url === '/api/organisations/o1/users') return json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid=direct-conversations] .conversation-label').map(label => label.text())).toEqual(['Removed user'])
+    expect(wrapper.findAll('[data-testid=group-conversations] > button')).toHaveLength(0)
+    expect(wrapper.get('h1').text()).toBe('Removed user')
+    expect(wrapper.text()).toContain('Historical message')
+    expect(wrapper.get('[data-testid=composer] textarea').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid=composer] textarea').attributes('placeholder')).toBe('Conversation unavailable')
+
+    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
+    expect(confirm).toHaveBeenCalledWith('Delete conversation with Removed user? This removes its messages and nobody will be able to send to it.')
     confirm.mockRestore()
   })
 
@@ -796,6 +1011,7 @@ describe('K-Mainstay UI', () => {
         { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
       ]))
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
@@ -805,6 +1021,7 @@ describe('K-Mainstay UI', () => {
     await wrapper.get('[data-testid=confirm-remove-b1]').trigger('click')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/bots/b1', expect.objectContaining({ method: 'DELETE' }))
+    expect(fetcher.mock.calls.filter(([url, init]) => url === '/api/organisations/o1/conversations' && !init)).toHaveLength(2)
     expect(wrapper.get('[data-testid=bots-section]').text()).not.toContain('Hector')
     expect(wrapper.text()).toContain('Hector removed')
   })

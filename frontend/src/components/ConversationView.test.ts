@@ -71,6 +71,16 @@ describe('ConversationView', () => {
     expect(group.get('[data-testid=bot-guidance]').text()).toContain('@mention')
   })
 
+  it('uses the other user name for direct-chat titles and composer wording but keeps group names', () => {
+    const direct = mount(ConversationView, { props: { selected: { ...conversation, name: 'legacy-internal-name', visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    expect(direct.get('h1').text()).toBe('Hector')
+    expect(direct.get('textarea').attributes('placeholder')).toBe('Message Hector')
+
+    const group = mount(ConversationView, { props: { selected: { ...conversation, name: 'Planning', visibility: 'members', member_ids: ['reader', 'hector', 'mary'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    expect(group.get('h1').text()).toBe('# Planning')
+    expect(group.get('textarea').attributes('placeholder')).toBe('Message #Planning')
+  })
+
   it('renders one new-messages divider immediately before the first unread message', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages, composer: '', busy: false, error: '', canDelete: false } })
 

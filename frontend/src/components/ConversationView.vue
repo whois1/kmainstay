@@ -18,10 +18,15 @@ const pickerOpen = ref(false)
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
 const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
-const directBot = computed(() => {
+const directUser = computed(() => {
   if (props.selected?.visibility !== 'members' || props.selected.member_ids?.length !== 2) return null
-  const otherID = props.selected.member_ids.find(id => id !== props.currentUserID)
-  return (props.users ?? []).find(user => user.id === otherID && user.kind === 'bot') ?? null
+  const otherUserID = props.selected.member_ids.find(id => id !== props.currentUserID)
+  return (props.users ?? []).find(user => user.id === otherUserID) ?? null
+})
+const removedDirectConversation = computed(() => props.selected?.visibility === 'members' && props.selected.member_ids?.length === 1 && props.selected.member_ids[0] === props.currentUserID)
+const conversationDisplayName = computed(() => removedDirectConversation.value ? 'Removed user' : directUser.value?.name ?? props.selected?.name ?? '')
+const directBot = computed(() => {
+  return directUser.value?.kind === 'bot' ? directUser.value : null
 })
 let capturedConversationID: string | null = null
 let initiallyPositioned = false
@@ -175,7 +180,7 @@ function handleScroll() {
 <template>
   <section class="conversation" aria-label="Conversation">
     <header v-if="selected">
-      <div><h1># {{ selected.name }}</h1><p>{{ selected.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div>
+      <div><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><p>{{ removedDirectConversation ? 'This person is no longer available' : selected.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div>
       <button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button>
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
@@ -190,12 +195,12 @@ function handleScroll() {
     </div>
     <button v-if="showJumpToBottom" data-testid="jump-to-bottom" class="jump-to-bottom" type="button" aria-label="Jump to latest message" @click="jumpToBottom">↓</button>
     <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')">
-      <div class="composer-input"><textarea ref="textarea" :value="draft" :placeholder="`Message #${selected.name}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" />
+      <div class="composer-input"><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation" :placeholder="removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" />
         <ul v-if="pickerVisible" id="mention-suggestions" class="mention-picker" role="listbox" aria-label="Mention a person or bot">
           <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
         </ul>
       </div>
-      <button :disabled="busy || !draft.trim()" aria-label="Send message">Send</button><small>Markdown supported · Enter to send</small>
+      <button :disabled="removedDirectConversation || busy || !draft.trim()" aria-label="Send message">Send</button><small>{{ removedDirectConversation ? 'This conversation is unavailable' : 'Markdown supported · Enter to send' }}</small>
       <small v-if="(users ?? []).some(user => user.kind === 'bot')" data-testid="bot-guidance">{{ directBot ? `${directBot.name} responds automatically in this private chat.` : 'Bots respond when you @mention them.' }}</small>
     </form>
     <p v-if="error" class="toast error" role="alert">{{ error }}</p>

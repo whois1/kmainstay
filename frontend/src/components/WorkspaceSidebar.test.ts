@@ -16,6 +16,8 @@ const users: User[] = [
   { id: 'michael', name: 'Michael', kind: 'human', role: 'admin' },
   { id: 'hector', name: 'Hector', kind: 'bot', role: 'member' },
   { id: 'mary', name: 'Mary', kind: 'human', role: 'member' },
+  { id: 'zoe', name: 'Zoe', kind: 'human', role: 'member' },
+  { id: 'alfred', name: 'Alfred', kind: 'bot', role: 'member' },
 ]
 
 describe('WorkspaceSidebar', () => {
@@ -32,12 +34,12 @@ describe('WorkspaceSidebar', () => {
     })
 
     const createButton = wrapper.get('[data-testid=new-conversation]')
-    expect(createButton.attributes('aria-label')).toBe('New private conversation')
+    expect(createButton.attributes('aria-label')).toBe('New group chat')
     expect(createButton.element.closest('section')).toBeNull()
     expect(wrapper.findAll('.sidebar-navigation h2').map(heading => heading.attributes('aria-label'))).toEqual(['Pinned', 'Direct messages', 'Group chats'])
     expect(wrapper.findAll('[data-testid=pinned-conversations] button').map(button => button.text())).toEqual(['#Announcements', '#General'])
-    expect(wrapper.findAll('[data-testid=direct-conversations] .conversation-label').map(label => label.text())).toEqual(['Mary', 'Hector'])
-    expect(wrapper.findAll('[data-testid=direct-conversations] button').map(button => button.find('small').exists() ? button.find('small').text() : '')).toEqual(['', 'bot'])
+    expect(wrapper.findAll('[data-testid=direct-conversations] .conversation-label').map(label => label.text())).toEqual(['Mary', 'Hector', 'Alfred', 'Zoe'])
+    expect(wrapper.findAll('[data-testid=direct-conversations] button').map(button => button.find('small').exists() ? button.find('small').text() : '')).toEqual(['', 'bot', 'bot', ''])
     expect(wrapper.findAll('[data-testid=group-conversations] > button').map(button => button.text())).toEqual(['#Launch', '#Planning'])
   })
 
@@ -59,7 +61,7 @@ describe('WorkspaceSidebar', () => {
     expect(directButton.attributes('aria-current')).toBeUndefined()
   })
 
-  it('emits the original conversation when its display name is selected', async () => {
+  it('emits the direct user when their display name is selected', async () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
         organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
@@ -72,6 +74,6 @@ describe('WorkspaceSidebar', () => {
     })
 
     await wrapper.findAll('[data-testid=direct-conversations] button')[1].trigger('click')
-    expect(wrapper.emitted('selectConversation')?.[0]).toEqual([conversations[2]])
+    expect(wrapper.emitted('selectDirectUser')?.[0]).toEqual([users[1]])
   })
 })

@@ -53,6 +53,122 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	}
 }
 
+func TestDirectConversation_IsIdempotentAndValidatesMembers(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "direct-conversation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var hector, mary map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &hector)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Mary"}), http.StatusCreated, &mary)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('legacy-direct',?,'Old Hector title','members',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_members(conversation_id,user_id) VALUES('legacy-direct',?),('legacy-direct',?)`, boot.UserID, hector["id"]); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/direct-conversations/" + hector["id"].(string)
+	for range 2 {
+		var conversation map[string]any
+		decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", nil), http.StatusOK, &conversation)
+		if conversation["id"] != "legacy-direct" || conversation["name"] != "Old Hector title" {
+			t.Fatalf("legacy conversation = %#v", conversation)
+		}
+	}
+
+	firstUserID, secondUserID := boot.UserID, mary["id"].(string)
+	if firstUserID > secondUserID {
+		firstUserID, secondUserID = secondUserID, firstUserID
+	}
+	oldReservedPairName := "direct:" + firstUserID + ":" + secondUserID
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": oldReservedPairName, "visibility": "members", "member_ids": []string{hector["id"].(string), mary["id"].(string)}}), http.StatusCreated, &map[string]any{})
+	maryEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/direct-conversations/" + mary["id"].(string)
+	responses := make(chan *http.Response, 2)
+	for range 2 {
+		go func() { responses <- requestJSON(t, client, http.MethodPost, maryEndpoint, server.URL, "", nil) }()
+	}
+	var createdIDs []string
+	for range 2 {
+		var conversation map[string]any
+		decodeResponse(t, <-responses, http.StatusOK, &conversation)
+		createdIDs = append(createdIDs, conversation["id"].(string))
+	}
+	if createdIDs[0] != createdIDs[1] {
+		t.Fatalf("concurrent calls returned %v", createdIDs)
+	}
+	var exactPairCount int
+	if err := db.QueryRow(`SELECT count(*) FROM conversations c WHERE c.organisation_id=? AND c.visibility='members' AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)=2 AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?) AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)`, boot.OrganisationID, boot.UserID, mary["id"]).Scan(&exactPairCount); err != nil || exactPairCount != 1 {
+		t.Fatalf("exact pair count = %d, err = %v", exactPairCount, err)
+	}
+
+	for _, target := range []string{boot.UserID, "missing-user"} {
+		response := requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/direct-conversations/"+target, server.URL, "", nil)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("target %q status = %d, want 400: %s", target, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+}
+
+func TestDirectConversation_RollsBackWhenMembershipDisappearsDuringCreation(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "direct-conversation-membership-race.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	botID := bot["id"].(string)
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TEMP TRIGGER remove_direct_conversation_target
+		AFTER INSERT ON conversations
+		WHEN NEW.visibility='members' AND NEW.name LIKE 'direct:%%'
+		BEGIN
+			DELETE FROM organisation_memberships WHERE organisation_id=NEW.organisation_id AND user_id=%q;
+		END`, botID)); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/direct-conversations/"+botID, server.URL, "", nil)
+	if response.StatusCode < 400 || response.StatusCode >= 500 {
+		t.Fatalf("status = %d, want non-500 client error: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+
+	var conversationCount, conversationMemberCount, membershipCount int
+	if err := db.QueryRow(`SELECT count(*) FROM conversations WHERE organisation_id=? AND name LIKE 'direct:%'`, boot.OrganisationID).Scan(&conversationCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_members WHERE conversation_id IN (SELECT id FROM conversations WHERE organisation_id=? AND name LIKE 'direct:%')`, boot.OrganisationID).Scan(&conversationMemberCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM organisation_memberships WHERE organisation_id=? AND user_id=?`, boot.OrganisationID, botID).Scan(&membershipCount); err != nil {
+		t.Fatal(err)
+	}
+	if conversationCount != 0 || conversationMemberCount != 0 || membershipCount != 1 {
+		t.Fatalf("conversation count = %d, member count = %d, membership count = %d; want 0, 0, 1", conversationCount, conversationMemberCount, membershipCount)
+	}
+}
+
 func TestPutConversationRead_PersistsValidSequence(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "mark-read.db"))
 	if err != nil {
@@ -711,6 +827,22 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 		t.Fatalf("remove status = %d: %s", removed.StatusCode, readBody(removed))
 	}
 	removed.Body.Close()
+	privateConversationID := privateConversation["id"].(string)
+	remainingMemberPost := requestJSON(t, admin, http.MethodPost, server.URL+"/api/conversations/"+privateConversationID+"/messages", server.URL, "", map[string]any{"body": "Nobody else is here", "client_id": "one-member-private"})
+	if remainingMemberPost.StatusCode != http.StatusForbidden {
+		t.Fatalf("one-member private post status = %d, want 403: %s", remainingMemberPost.StatusCode, readBody(remainingMemberPost))
+	}
+	remainingMemberPost.Body.Close()
+	var privateMessageCount, privateEventCount int
+	if err := db.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=?`, privateConversationID).Scan(&privateMessageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_events WHERE conversation_id=?`, privateConversationID).Scan(&privateEventCount); err != nil {
+		t.Fatal(err)
+	}
+	if privateMessageCount != 0 || privateEventCount != 0 {
+		t.Fatalf("one-member private inserts: messages=%d events=%d", privateMessageCount, privateEventCount)
+	}
 	close(slowBody.release)
 	close(retryBody.release)
 	<-slowDone
