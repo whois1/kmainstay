@@ -33,6 +33,7 @@ An ORM or generated query layer can be added behind the database package later i
 ## Documents
 
 - [Product vision](docs/product-vision.md)
+- [Company Brain thesis and idea bank](docs/company-brain-thesis.md)
 - [Lean MVP](docs/mvp.md)
 - [MVP architecture](docs/architecture.md)
 - [Newcomer guide](docs/newcomer-guide.md)

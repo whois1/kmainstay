@@ -143,4 +143,6 @@ Do not initially build:
 
 The workspace may eventually hold people, agents, conversations, files, projects, instructions, skills, memory, permissions, capabilities, and activity. Runtimes then become replaceable execution engines without discarding an agent’s identity or accumulated context.
 
+The [Company Brain thesis](company-brain-thesis.md) records a broader possible direction: permissioned, versioned organisational knowledge designed for humans and agents as first-class identities. It is an idea bank, not current scope or an approved roadmap.
+
 That direction is a constraint on avoidable coupling, not permission to build the later product now.
