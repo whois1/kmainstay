@@ -61,6 +61,18 @@ Possible authorities include read, create, write, delete, propose, approve, exec
 
 Permissions must apply before retrieval, including to full-text search, semantic search, structured queries, citations, filenames, embeddings, diffs and historical versions. “Search everything, then tell the model not to reveal secrets” is not an acceptable security model.
 
+### Authority and discovery are different
+
+A strong architectural rule is:
+
+> **Folders determine authority. Relationships determine discovery.**
+
+A stable hierarchy can provide understandable ownership, inheritance and security boundaries without becoming the main way people find information. A meeting or document may physically belong in one authorised location while also relating to several customers, people, projects, systems, decisions and commitments.
+
+Search, agents and generated customer, project or topic views can traverse those relationships, but may surface an item only when both the requesting human and invoked agent are authorised to access its source. One item should not need to be manually copied into several folders.
+
+The product should demand as little manual filing as practical. Agents could suggest or maintain classifications, relationships, titles, entities, duplicates and summaries. Humans should intervene where authority, ambiguity, security or approval matters. This is **organisation without requiring constant manual organisation**, not an ungoverned shared bucket.
+
 ### Versioned change
 
 Every knowledge change should preserve:
@@ -106,6 +118,10 @@ The stronger outcome is not merely answering questions. The system could help ma
 - proposed changes requiring an authorised reviewer.
 
 Agents should bundle related edits into reviewable change sets with provenance rather than silently changing many files.
+
+Meetings are an ingestion source, not a destination. Their durable output should not stop at a transcript, summary or folder. Agents could extract decisions, facts, commitments, unresolved questions and process changes; compare them with current authorised knowledge; identify contradictions or missing documentation; research gaps; and propose linked updates for review. Months later, a user should be able to ask for the current policy and trace it back to the meeting that changed it without first remembering which meeting or folder contained the discussion.
+
+The desired behaviour is proactive but bounded: notice that a runbook may now be stale, explain the evidence, draft the smallest coherent change, and ask the authorised person to approve it. If evidence is insufficient, record the uncertainty or propose research rather than manufacturing an update.
 
 ## Interfaces built on the substrate
 
