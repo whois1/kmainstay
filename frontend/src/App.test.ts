@@ -29,6 +29,15 @@ describe('K-Mainstay UI', () => {
     expect(cssRule('.message-list')).toContain('overflow-y: auto')
   })
 
+  it('truncates long conversation labels with an ellipsis', () => {
+    const rule = cssRule('.conversation-label')
+    expect(rule).toContain('flex: 1 1 auto')
+    expect(rule).toContain('min-width: 0')
+    expect(rule).toContain('overflow: hidden')
+    expect(rule).toContain('text-overflow: ellipsis')
+    expect(rule).toContain('white-space: nowrap')
+  })
+
   it('names the persistent navigation and active product surface', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
