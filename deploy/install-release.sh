@@ -66,17 +66,27 @@ cp --preserve=mode,ownership,timestamps -- "${database_files[@]}" "$backup_direc
 rollback_needed=1
 rollback() {
   local exit_status=$?
+  set +e
   if (( rollback_needed == 1 )); then
     printf 'deployment failed; restoring previous binary and database\n' >&2
     systemctl stop kmainstay >/dev/null 2>&1 || true
     install -o root -g root -m 0755 "$backup_directory/kmainstay" "$application_path"
     install -o root -g root -m 0755 "$backup_directory/kmainstay-initialise" "$initialisation_path"
-    rm -f -- "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"
     restored_database_files=()
     for database_file in "$backup_directory/kmainstay.db" "$backup_directory/kmainstay.db-wal" "$backup_directory/kmainstay.db-shm"; do
       [[ -f "$database_file" ]] && restored_database_files+=("$database_file")
     done
-    cp --preserve=mode,ownership,timestamps -- "${restored_database_files[@]}" "$data_directory/"
+    database_restore_ready=true
+    for database_file in "${restored_database_files[@]}"; do
+      cp --preserve=mode,ownership,timestamps -- "$database_file" "$data_directory/.restore-${database_file##*/}" || database_restore_ready=false
+    done
+    if [[ "$database_restore_ready" == true ]]; then
+      rm -f -- "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"
+      for database_file in "${restored_database_files[@]}"; do
+        mv -- "$data_directory/.restore-${database_file##*/}" "$data_directory/${database_file##*/}"
+      done
+    fi
+    rm -f -- "$data_directory"/.restore-kmainstay.db*
     systemctl start kmainstay || true
   fi
   rm -f -- "$application_upload" "$initialisation_upload"
