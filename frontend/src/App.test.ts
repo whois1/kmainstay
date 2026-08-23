@@ -29,7 +29,11 @@ describe('K-Mainstay UI', () => {
     expect(cssRule('.message-list')).toContain('overflow-y: auto')
   })
 
-  it('truncates long conversation labels with an ellipsis', () => {
+  it('constrains long conversation labels to the sidebar before applying an ellipsis', () => {
+    expect(cssRule('.sidebar-navigation section')).toContain('min-width: 0')
+    expect(cssRule('.direct-contact')).toContain('min-width: 0')
+    expect(cssRule('.direct-topic')).toContain('min-width: 0')
+
     const rule = cssRule('.conversation-label')
     expect(rule).toContain('flex: 1 1 auto')
     expect(rule).toContain('min-width: 0')
