@@ -38,8 +38,8 @@ let positionedMessageCount = 0
 watch(() => props.composer, value => { draft.value = value })
 watch(() => props.image, value => {
   selectedImage.value = value ?? null
-  updatePreview()
 })
+watch(selectedImage, updatePreview, { immediate: true })
 watch(() => props.selected?.id, () => { closeMentionPicker(); imageError.value = ''; removeImage() })
 
 function selectImage(event: Event) {
@@ -57,7 +57,6 @@ function selectImageFile(file: File | null) {
     return
   }
   selectedImage.value = file
-  updatePreview()
   emit('update:image', file)
 }
 
@@ -85,7 +84,6 @@ function removeImage() {
   if (!selectedImage.value && !previewURL.value) return
   selectedImage.value = null
   imageError.value = ''
-  updatePreview()
   emit('update:image', null)
 }
 

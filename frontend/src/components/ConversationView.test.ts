@@ -41,6 +41,29 @@ describe('ConversationView', () => {
     expect(wrapper.emitted('update:image')?.at(-1)).toEqual([null])
   })
 
+  it('keeps the selected image preview URL valid when the parent stores the file', async () => {
+    const createObjectURL = vi.fn(() => 'blob:selected-image')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+    try {
+      const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+      const file = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' })
+      const input = wrapper.get('input[type=file]')
+      Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+
+      await input.trigger('change')
+      await wrapper.setProps({ image: file })
+
+      expect(wrapper.get('[data-testid=selected-image] img').attributes('src')).toBe('blob:selected-image')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+      wrapper.unmount()
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:selected-image')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('selects an image pasted into the composer', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
     const file = new File([new Uint8Array([1, 2, 3])], 'pasted.png', { type: 'image/png' })
