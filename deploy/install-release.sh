@@ -81,10 +81,36 @@ rollback() {
       cp --preserve=mode,ownership,timestamps -- "$database_file" "$data_directory/.restore-${database_file##*/}" || database_restore_ready=false
     done
     if [[ "$database_restore_ready" == true ]]; then
-      rm -f -- "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"
-      for database_file in "${restored_database_files[@]}"; do
-        mv -- "$data_directory/.restore-${database_file##*/}" "$data_directory/${database_file##*/}"
+      live_database_files=()
+      for database_file in "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"; do
+        [[ -f "$database_file" ]] && live_database_files+=("$database_file")
       done
+      staged_live_database_files=()
+      database_swap_started=false
+      for database_file in "${live_database_files[@]}"; do
+        if mv -- "$database_file" "$data_directory/.failed-${database_file##*/}"; then
+          staged_live_database_files+=("$database_file")
+        else
+          database_restore_ready=false
+          break
+        fi
+      done
+      if [[ "$database_restore_ready" == true ]]; then
+        database_swap_started=true
+        for database_file in "${restored_database_files[@]}"; do
+          mv -- "$data_directory/.restore-${database_file##*/}" "$data_directory/${database_file##*/}" || database_restore_ready=false
+        done
+      fi
+      if [[ "$database_restore_ready" == false ]]; then
+        if [[ "$database_swap_started" == true ]]; then
+          rm -f -- "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"
+        fi
+        for database_file in "${staged_live_database_files[@]}"; do
+          mv -- "$data_directory/.failed-${database_file##*/}" "$database_file"
+        done
+      else
+        rm -f -- "$data_directory"/.failed-kmainstay.db*
+      fi
     fi
     rm -f -- "$data_directory"/.restore-kmainstay.db*
     systemctl start kmainstay || true
