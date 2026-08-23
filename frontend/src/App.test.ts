@@ -42,6 +42,14 @@ describe('K-Mainstay UI', () => {
     expect(rule).toContain('white-space: nowrap')
   })
 
+  it('keeps conversation actions visible when the title is long', () => {
+    expect(cssRule('.conversation > header')).toContain('min-width: 0')
+    const copyRule = cssRule('.conversation-header-copy')
+    expect(copyRule).toContain('flex: 1 1 auto')
+    expect(copyRule).toContain('min-width: 0')
+    expect(cssRule('.conversation-header-actions')).toContain('flex: 0 0 auto')
+  })
+
   it('names the persistent navigation and active product surface', async () => {
     const fetcher = loadedFetcher()
     fetcher.mockImplementationOnce(() => json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }]))
