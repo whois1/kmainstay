@@ -836,6 +836,13 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 	}
 	removed.Body.Close()
 	privateConversationID := privateConversation["id"].(string)
+	var visibleConversations []map[string]any
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &visibleConversations)
+	for _, conversation := range visibleConversations {
+		if conversation["id"] == privateConversationID {
+			t.Fatalf("removed user's direct conversation remains visible: %#v", conversation)
+		}
+	}
 	remainingMemberPost := requestJSON(t, admin, http.MethodPost, server.URL+"/api/conversations/"+privateConversationID+"/messages", server.URL, "", map[string]any{"body": "Nobody else is here", "client_id": "one-member-private"})
 	if remainingMemberPost.StatusCode != http.StatusForbidden {
 		t.Fatalf("one-member private post status = %d, want 403: %s", remainingMemberPost.StatusCode, readBody(remainingMemberPost))

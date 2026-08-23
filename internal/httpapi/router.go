@@ -218,7 +218,9 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
 		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=om.user_id
-		WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?))
+		WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR (
+			(SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=c.id)>=2
+			AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)))
 		ORDER BY c.created_at,c.id`, r.PathValue("organisation"), current(r).ID, current(r).ID)
 	if err != nil {
 		writeError(w, 500, "database error")
