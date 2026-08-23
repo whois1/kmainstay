@@ -42,7 +42,7 @@ const showConversation = ref(false)
 const conversationDialogMode = ref<'group' | 'topic'>('group')
 const conversationContext = ref('')
 const creatingConversation = ref(false)
-const titleSavingConversationID = ref('')
+const titleSavingConversationIDs = ref(new Set<string>())
 let conversationCreationGeneration = 0
 const conversationName = ref('')
 const conversationTitleAutomatic = ref(false)
@@ -476,8 +476,8 @@ async function createConversation() {
 
 async function updateConversationTitle(name: string) {
   const conversation = selected.value
-  if (!conversation || titleSavingConversationID.value === conversation.id) return
-  titleSavingConversationID.value = conversation.id
+  if (!conversation || titleSavingConversationIDs.value.has(conversation.id)) return
+  titleSavingConversationIDs.value = new Set(titleSavingConversationIDs.value).add(conversation.id)
   try {
     const updated = await request<Pick<Conversation, 'name' | 'title_automatic'>>(`/api/conversations/${conversation.id}/title`, jsonInit('PUT', { name }))
     conversationRefreshGeneration++
@@ -493,7 +493,9 @@ async function updateConversationTitle(name: string) {
   } catch (cause) {
     if (selected.value?.id === conversation.id) error.value = messageOf(cause)
   } finally {
-    if (titleSavingConversationID.value === conversation.id) titleSavingConversationID.value = ''
+    const savingConversationIDs = new Set(titleSavingConversationIDs.value)
+    savingConversationIDs.delete(conversation.id)
+    titleSavingConversationIDs.value = savingConversationIDs
   }
 }
 
@@ -589,7 +591,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationID === selected?.id" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @update-title="updateConversationTitle" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @update-title="updateConversationTitle" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

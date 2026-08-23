@@ -638,6 +638,47 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('h1').text()).toBe('Manual title')
   })
 
+  it('keeps title saving disabled per conversation across navigation', async () => {
+    let finishFirstSave!: (response: Response) => void
+    let finishSecondSave!: (response: Response) => void
+    const firstSave = new Promise<Response>(resolve => { finishFirstSave = resolve })
+    const secondSave = new Promise<Response>(resolve => { finishSecondSave = resolve })
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([
+        { id: 'c1', name: 'Alpha', visibility: 'organisation' },
+        { id: 'c2', name: 'Beta', visibility: 'organisation' },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/title' && init?.method === 'PUT') return firstSave
+      if (url === '/api/conversations/c2/title' && init?.method === 'PUT') return secondSave
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    await wrapper.get('[data-testid=edit-conversation-title]').trigger('click')
+    await wrapper.get('[data-testid=conversation-title-input]').setValue('Alpha edited')
+    await wrapper.get('[data-testid=conversation-title-form]').trigger('submit')
+    await wrapper.findAll('nav button').find(button => button.text().includes('Beta'))!.trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid=edit-conversation-title]').trigger('click')
+    await wrapper.get('[data-testid=conversation-title-input]').setValue('Beta edited')
+    await wrapper.get('[data-testid=conversation-title-form]').trigger('submit')
+    await wrapper.findAll('nav button').find(button => button.text().includes('Alpha'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid=edit-conversation-title]').attributes('disabled')).toBeDefined()
+    finishSecondSave(await json({ id: 'c2', name: 'Beta edited', title_automatic: false }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid=edit-conversation-title]').attributes('disabled')).toBeDefined()
+    finishFirstSave(await json({ id: 'c1', name: 'Alpha edited', title_automatic: false }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid=edit-conversation-title]').attributes('disabled')).toBeUndefined()
+  })
+
   it('creates a second named topic chat with the same direct user', async () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
