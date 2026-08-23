@@ -39,6 +39,10 @@ const botMutationID = ref('')
 const notice = ref('')
 const removingBotID = ref('')
 const showConversation = ref(false)
+const conversationDialogMode = ref<'group' | 'topic'>('group')
+const conversationContext = ref('')
+const creatingConversation = ref(false)
+let conversationCreationGeneration = 0
 const conversationName = ref('')
 const users = ref<User[]>([])
 const eligibleUsers = ref<EligibleUser[]>([])
@@ -351,10 +355,50 @@ function closeAddUser() {
   addUserStep.value = ''
 }
 
+function beginConversationDialog() {
+  conversationCreationGeneration++
+  creatingConversation.value = false
+}
+
+function closeConversationDialog() {
+  beginConversationDialog()
+  showConversation.value = false
+}
+
 async function openConversationDialog() {
   if (!organisation.value) return
+  const dialogIntentGeneration = ++navigationIntentGeneration
+  const conversationUsers = await request<User[]>(`/api/organisations/${organisation.value.id}/users`)
+  if (dialogIntentGeneration !== navigationIntentGeneration) return
+  users.value = conversationUsers
+  beginConversationDialog()
+  conversationDialogMode.value = 'group'
+  conversationContext.value = ''
+  conversationName.value = ''
+  memberIDs.value = []
+  showConversation.value = true
+}
+
+function openDirectTopicDialog(user: User) {
   navigationIntentGeneration++
-  users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`)
+  beginConversationDialog()
+  conversationDialogMode.value = 'topic'
+  conversationContext.value = `New chat with ${user.name}`
+  conversationName.value = ''
+  memberIDs.value = [user.id]
+  showConversation.value = true
+}
+
+function openTopicDialog(conversation: Conversation) {
+  if (!me.value || conversation.visibility !== 'members') return
+  navigationIntentGeneration++
+  beginConversationDialog()
+  const participantIDs = (conversation.member_ids ?? []).filter(userID => userID !== me.value!.id)
+  const participantNames = participantIDs.map(userID => users.value.find(user => user.id === userID)?.name).filter(Boolean)
+  conversationDialogMode.value = 'topic'
+  conversationContext.value = `New chat with ${participantNames.join(', ')}`
+  conversationName.value = ''
+  memberIDs.value = participantIDs
   showConversation.value = true
 }
 
@@ -390,12 +434,26 @@ async function selectDirectUser(user: User) {
 }
 
 async function createConversation() {
-  if (!organisation.value || !conversationName.value.trim() || memberIDs.value.length < 2) return
+  const minimumParticipants = conversationDialogMode.value === 'group' ? 2 : 1
+  const name = conversationName.value.trim()
+  if (!organisation.value || !name || memberIDs.value.length < minimumParticipants || creatingConversation.value) return
+  const creationGeneration = conversationCreationGeneration
+  const organisationID = organisation.value.id
+  const submittedMemberIDs = [...memberIDs.value]
+  creatingConversation.value = true
   try {
-    const conversation = await request<Conversation>(`/api/organisations/${organisation.value.id}/conversations`, jsonInit('POST', { name: conversationName.value.trim(), visibility: 'members', member_ids: memberIDs.value }))
-    conversations.value.push(conversation); showConversation.value = false; conversationName.value = ''; memberIDs.value = []
+    const conversation = await request<Conversation>(`/api/organisations/${organisationID}/conversations`, jsonInit('POST', { name, visibility: 'members', member_ids: submittedMemberIDs }))
+    if (!conversations.value.some(({ id }) => id === conversation.id)) conversations.value.push(conversation)
+    if (creationGeneration !== conversationCreationGeneration) return
+    showConversation.value = false
+    conversationName.value = ''
+    memberIDs.value = []
     await selectConversation(conversation)
-  } catch (cause) { error.value = messageOf(cause) }
+  } catch (cause) {
+    if (creationGeneration === conversationCreationGeneration) error.value = messageOf(cause)
+  } finally {
+    if (creationGeneration === conversationCreationGeneration) creatingConversation.value = false
+  }
 }
 
 async function deleteSelectedConversation() {
@@ -406,7 +464,9 @@ async function deleteSelectedConversation() {
     : undefined
   const otherUser = users.value.find(user => user.id === otherUserID)
   const removedDirectConversation = conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === me.value?.id
-  const deleteName = otherUser ? `conversation with ${otherUser.name}` : removedDirectConversation ? 'conversation with Removed user' : `#${conversation.name}`
+  const legacyPairName = `direct:${[...(conversation.member_ids ?? [])].sort().join(':')}`
+  const directTopic = conversation.name === `direct:${conversation.id}` || conversation.name === legacyPairName ? 'General' : conversation.name
+  const deleteName = otherUser ? `"${directTopic}" with ${otherUser.name}` : removedDirectConversation ? 'conversation with Removed user' : `#${conversation.name}`
   if (!window.confirm(`Delete ${deleteName}? This removes its messages and nobody will be able to send to it.`)) return
   busy.value = true
   error.value = ''
@@ -476,8 +536,8 @@ onBeforeUnmount(realtime.disconnect)
     </form>
   </main>
   <main v-else class="workspace">
-    <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 
@@ -487,7 +547,7 @@ onBeforeUnmount(realtime.disconnect)
     <template v-else><p class="dialog-context">{{ keyAction === 'created' ? 'Bot created' : 'Key rotated' }}</p><h2 id="bot-dialog-title">{{ keyAction === 'created' ? 'Copy this key now' : 'Copy the rotated key now' }}</h2><p class="warning">This API key is shown only once. Store it somewhere secure before closing.</p><code class="api-key">{{ apiKey }}</code><button data-testid="copy-key" data-dialog-initial-focus @click="copyKey">{{ copied ? 'Copied' : 'Copy API key' }}</button><p v-if="keyError" class="error" role="alert">{{ keyError }}</p><label class="check key-saved-confirmation"><input data-testid="key-saved" v-model="keySaved" type="checkbox"><span>I saved this key securely</span></label></template>
   </BaseDialog>
 
-  <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="showConversation = false">
-    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="showConversation = false">×</button><p class="dialog-context">New group chat</p><h2 id="conversation-dialog-title">Create group chat</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required placeholder="e.g. Planning"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="!conversationName.trim() || memberIDs.length < 2">Create group chat</button></form>
+  <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="closeConversationDialog">
+    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">{{ conversationDialogMode === 'topic' ? conversationContext : 'New group chat' }}</p><h2 id="conversation-dialog-title">{{ conversationDialogMode === 'topic' ? 'Start a topic chat' : 'Create group chat' }}</h2><label>{{ conversationDialogMode === 'topic' ? 'Topic' : 'Name' }}<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required :placeholder="conversationDialogMode === 'topic' ? 'e.g. K-Mainstay navigation' : 'e.g. Planning'"></label><fieldset v-if="conversationDialogMode === 'group'"><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < (conversationDialogMode === 'group' ? 2 : 1)">{{ creatingConversation ? 'Creating…' : conversationDialogMode === 'topic' ? 'Create chat' : 'Create group chat' }}</button></form>
   </BaseDialog>
 </template>

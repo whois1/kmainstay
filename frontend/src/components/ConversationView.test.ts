@@ -170,14 +170,23 @@ describe('ConversationView', () => {
     expect(group.get('[data-testid=bot-guidance]').text()).toContain('@mention')
   })
 
-  it('uses the other user name for direct-chat titles and composer wording but keeps group names', () => {
-    const direct = mount(ConversationView, { props: { selected: { ...conversation, name: 'legacy-internal-name', visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
-    expect(direct.get('h1').text()).toBe('Hector')
-    expect(direct.get('textarea').attributes('placeholder')).toBe('Message Hector')
+  it('uses the topic for direct-chat titles and identifies the other person beneath it', () => {
+    const direct = mount(ConversationView, { props: { selected: { ...conversation, name: 'Agent navigation', visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+    expect(direct.get('h1').text()).toBe('Agent navigation')
+    expect(direct.get('header p').text()).toBe('With Hector')
+    expect(direct.get('textarea').attributes('placeholder')).toBe('Message Agent navigation')
 
     const group = mount(ConversationView, { props: { selected: { ...conversation, name: 'Planning', visibility: 'members', member_ids: ['reader', 'hector', 'mary'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
     expect(group.get('h1').text()).toBe('# Planning')
+    expect(group.get('header p').text()).toBe('Private conversation')
     expect(group.get('textarea').attributes('placeholder')).toBe('Message #Planning')
+  })
+
+  it('keeps a user-created direct-prefixed topic title', () => {
+    const direct = mount(ConversationView, { props: { selected: { ...conversation, id: 'custom-topic', name: 'direct:roadmap', visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
+
+    expect(direct.get('h1').text()).toBe('direct:roadmap')
+    expect(direct.get('textarea').attributes('placeholder')).toBe('Message direct:roadmap')
   })
 
   it('renders one new-messages divider immediately before the first unread message', async () => {

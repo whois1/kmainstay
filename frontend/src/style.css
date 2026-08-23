@@ -72,9 +72,17 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .sidebar-section-heading { min-height: 32px; padding: 0 8px; }
 .sidebar-section-heading > h2 { flex: 1; }
 .sidebar-section-heading .icon-button { margin-left: auto; }
-.sidebar-navigation section > button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px; background: transparent; color: var(--secondary); text-align: left; font-size: 15px; font-weight: 400; }
-.sidebar-navigation section > button:hover { background: var(--hover); color: var(--text); }
-.sidebar-navigation section > button.active { background: var(--raised); color: var(--text); font-weight: 500; }
+.sidebar-navigation section > button, .direct-contact-button, .direct-topic, .conversation-main { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px; background: transparent; color: var(--secondary); text-align: left; font-size: 15px; font-weight: 400; }
+.sidebar-navigation section > button:hover, .direct-contact-button:hover, .direct-topic:hover, .conversation-main:hover { background: var(--hover); color: var(--text); }
+.sidebar-navigation section > button.active, .direct-contact-button.active, .direct-topic.active, .conversation-main.active { background: var(--raised); color: var(--text); font-weight: 500; }
+.direct-contact { display: grid; gap: 2px; }
+.direct-contact-heading, .conversation-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; align-items: center; gap: 2px; }
+.direct-contact-button { min-width: 0; }
+.direct-topic { padding-left: 38px; font-size: 13px; }
+.removed-direct-topic { padding-left: 8px; }
+.topic-branch { color: var(--muted); }
+.topic-add { width: 32px; min-height: 32px; padding: 0; background: transparent; color: var(--muted); font-size: 17px; }
+.topic-add:hover { background: var(--hover); color: var(--text); }
 .conversation-hash { color: var(--muted); }
 .conversation-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-navigation button small { margin-left: auto; color: var(--muted); font-size: 12px; }
@@ -83,6 +91,8 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 
 .conversation { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; position: relative; }
 .conversation > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 76px; padding: 16px max(24px, calc((100% - 840px) / 2)); border-bottom: 1px solid var(--border); }
+.conversation-header-actions { display: flex; align-items: center; gap: 8px; }
+.conversation-header-actions button { white-space: nowrap; }
 .conversation h1 { margin-bottom: 2px; font-size: 20px; }
 .conversation header p, .settings-header p, .settings-section-heading p, .settings-note, .empty-state p { margin: 0; color: var(--secondary); font-size: 13px; }
 .message-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }
@@ -168,7 +178,10 @@ fieldset { border: 0; padding: 0; margin: 20px 0; }
   .brand { flex-direction: column; padding-inline: 0; }
   .brand-settings { margin-left: 0; }
   .side-heading, .sidebar-section-heading, .profile { justify-content: center; }
-  .sidebar-navigation section > button { display: grid; justify-items: center; gap: 2px; padding: 8px 4px; text-align: center; }
+  .sidebar-navigation section > button, .direct-contact-button, .direct-topic, .conversation-main { display: grid; justify-items: center; gap: 2px; padding: 8px 4px; text-align: center; }
+  .direct-topic { padding-left: 4px; }
+  .topic-branch, .sidebar-navigation .topic-add { display: none; }
+  .conversation-row, .direct-contact-heading { grid-template-columns: 1fr; }
   .sidebar-navigation button .conversation-hash { display: none; }
   .conversation-label { width: 100%; font-size: 13px; }
   .conversation > header { align-items: flex-start; padding: 16px; }

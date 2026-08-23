@@ -4,7 +4,7 @@ import { renderMarkdown } from '../markdown'
 import type { Conversation, Message, User } from '../types'
 
 const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; image?: File | null; busy: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
-const emit = defineEmits<{ deleteConversation: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
+const emit = defineEmits<{ deleteConversation: []; newTopic: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
@@ -27,7 +27,21 @@ const directUser = computed(() => {
   return (props.users ?? []).find(user => user.id === otherUserID) ?? null
 })
 const removedDirectConversation = computed(() => props.selected?.visibility === 'members' && props.selected.member_ids?.length === 1 && props.selected.member_ids[0] === props.currentUserID)
-const conversationDisplayName = computed(() => removedDirectConversation.value ? 'Removed user' : directUser.value?.name ?? props.selected?.name ?? '')
+const reservedDirectConversation = computed(() => {
+  if (!props.selected) return false
+  const legacyPairName = `direct:${[...(props.selected.member_ids ?? [])].sort().join(':')}`
+  return props.selected.name === `direct:${props.selected.id}` || props.selected.name === legacyPairName
+})
+const conversationDisplayName = computed(() => {
+  if (removedDirectConversation.value) return 'Removed user'
+  if (directUser.value && reservedDirectConversation.value) return 'General'
+  return props.selected?.name ?? ''
+})
+const conversationContext = computed(() => {
+  if (removedDirectConversation.value) return 'This person is no longer available'
+  if (directUser.value) return `With ${directUser.value.name}`
+  return props.selected?.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation'
+})
 const directBot = computed(() => {
   return directUser.value?.kind === 'bot' ? directUser.value : null
 })
@@ -241,8 +255,8 @@ function handleScroll() {
 <template>
   <section class="conversation" aria-label="Conversation">
     <header v-if="selected">
-      <div><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><p>{{ removedDirectConversation ? 'This person is no longer available' : selected.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation' }}</p></div>
-      <button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button>
+      <div><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><p>{{ conversationContext }}</p></div>
+      <div class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button></div>
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
     <div ref="messageList" class="message-list" aria-live="polite" @scroll="handleScroll">

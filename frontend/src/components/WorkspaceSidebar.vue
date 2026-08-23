@@ -11,9 +11,11 @@ const props = defineProps<{
   settingsActive: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   openSettings: []
   newConversation: []
+  newDirectTopic: [user: User]
+  newTopic: [conversation: Conversation]
   selectDirectUser: [user: User]
   selectConversation: [conversation: Conversation]
 }>()
@@ -25,40 +27,42 @@ function byLatestMessage(left: Conversation, right: Conversation) {
 
 const pinnedConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'organisation').sort(byLatestMessage))
 const directConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestMessage))
-const removedDirectConversations = computed(() => props.conversations.filter(isRemovedDirectConversation).sort(byLatestMessage))
-const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length !== 2 && !isRemovedDirectConversation(conversation)).sort(byLatestMessage))
+const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestMessage))
+const removedDirectConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestMessage))
 
-const directMessageUsers = computed(() => {
-  const otherUsersByConversation = new Map<string, Conversation>()
-  for (const conversation of directConversations.value) {
-    const otherUser = directUser(conversation)
-    if (otherUser && !otherUsersByConversation.has(otherUser.id)) otherUsersByConversation.set(otherUser.id, conversation)
-  }
-  const usersWithConversations = [...otherUsersByConversation.values()].map(conversation => ({ key: `user:${directUser(conversation)!.id}`, user: directUser(conversation)!, conversation, removed: false }))
-  const usersWithoutConversations = props.users
-    .filter(user => user.id !== props.principal.id && !otherUsersByConversation.has(user.id))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map(user => ({ key: `user:${user.id}`, user, conversation: null, removed: false }))
-  const removedConversations = removedDirectConversations.value.map(conversation => ({
-    key: `removed:${conversation.id}`,
-    user: { id: `removed:${conversation.id}`, name: 'Removed user', kind: 'human' as const, role: 'member' as const },
-    conversation,
-    removed: true,
-  }))
-  return [...usersWithConversations, ...removedConversations, ...usersWithoutConversations]
+const directContacts = computed(() => {
+  const contacts = props.users
+    .filter(user => user.id !== props.principal.id)
+    .map(user => {
+      const topics = directConversations.value.filter(conversation => conversation.member_ids?.includes(user.id))
+      return { user, topics, latestSequence: topics[0]?.latest_sequence ?? -1 }
+    })
+  return contacts.sort((left, right) =>
+    right.latestSequence - left.latestSequence
+    || left.user.name.localeCompare(right.user.name),
+  )
 })
 
-function isRemovedDirectConversation(conversation: Conversation) {
-  return conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal.id
+function directTopicName(conversation: Conversation) {
+  return isReservedDirectConversation(conversation) ? 'General' : conversation.name
 }
 
-function directUser(conversation: Conversation) {
-  const otherUserID = conversation.member_ids?.find(userID => userID !== props.principal.id)
-  return props.users.find(user => user.id === otherUserID)
+function isReservedDirectConversation(conversation: Conversation) {
+  const legacyPairName = `direct:${[...(conversation.member_ids ?? [])].sort().join(':')}`
+  return conversation.name === `direct:${conversation.id}` || conversation.name === legacyPairName
 }
 
 function isCurrentConversation(conversation: Conversation) {
   return !props.settingsActive && props.selected?.id === conversation.id
+}
+
+function isCurrentDirectContact(topics: Conversation[]) {
+  return topics.some(isCurrentConversation)
+}
+
+function openLatestDirectTopic(user: User, topics: Conversation[]) {
+  if (topics[0]) emit('selectConversation', topics[0])
+  else emit('selectDirectUser', user)
 }
 </script>
 
@@ -81,16 +85,30 @@ function isCurrentConversation(conversation: Conversation) {
       </section>
       <section data-testid="direct-conversations" aria-labelledby="direct-heading">
         <h2 id="direct-heading" class="sidebar-section-heading" aria-label="Direct messages"><span aria-hidden="true">●</span><span>Direct messages</span></h2>
-        <button v-for="entry in directMessageUsers" :key="entry.key" :class="{ active: entry.conversation && isCurrentConversation(entry.conversation) }" :aria-current="entry.conversation && isCurrentConversation(entry.conversation) ? 'page' : undefined" @click="entry.removed ? $emit('selectConversation', entry.conversation!) : $emit('selectDirectUser', entry.user)">
-          <span class="direct-avatar" aria-hidden="true">{{ entry.user.name.slice(0, 1) }}</span>
-          <span class="conversation-label">{{ entry.user.name }}</span><small v-if="entry.user.kind === 'bot'">bot</small>
+        <div v-for="contact in directContacts" :key="contact.user.id" class="direct-contact" :data-testid="`direct-contact-${contact.user.id}`">
+          <div class="direct-contact-heading">
+            <button class="direct-contact-button" :class="{ active: isCurrentDirectContact(contact.topics) }" @click="openLatestDirectTopic(contact.user, contact.topics)">
+              <span class="direct-avatar" aria-hidden="true">{{ contact.user.name.slice(0, 1) }}</span>
+              <span class="conversation-label">{{ contact.user.name }}</span><small v-if="contact.user.kind === 'bot'">bot</small>
+            </button>
+            <button :data-testid="`new-direct-topic-${contact.user.id}`" class="topic-add" :aria-label="`New chat with ${contact.user.name}`" :title="`New chat with ${contact.user.name}`" @click="$emit('newDirectTopic', contact.user)">＋</button>
+          </div>
+          <button v-for="conversation in contact.topics" :key="conversation.id" class="direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+            <span class="topic-branch" aria-hidden="true">↳</span><span class="conversation-label">{{ directTopicName(conversation) }}</span>
+          </button>
+        </div>
+        <button v-for="conversation in removedDirectConversations" :key="conversation.id" class="direct-topic removed-direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+          <span class="direct-avatar" aria-hidden="true">?</span><span class="conversation-label">Removed user</span>
         </button>
       </section>
       <section data-testid="group-conversations" aria-labelledby="group-heading">
         <h2 id="group-heading" class="sidebar-section-heading" aria-label="Group chats"><span aria-hidden="true">◇</span><span>Group chats</span></h2>
-        <button v-for="conversation in groupConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
-        </button>
+        <div v-for="conversation in groupConversations" :key="conversation.id" class="conversation-row">
+          <button class="conversation-main" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+            <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+          </button>
+          <button :data-testid="`new-group-topic-${conversation.id}`" class="topic-add" :aria-label="`New chat with the people in ${conversation.name}`" title="New chat with the same people" @click="$emit('newTopic', conversation)">＋</button>
+        </div>
       </section>
     </nav>
     <div class="profile"><span>{{ principal.name.slice(0, 1) }}</span><div><strong>{{ principal.name }}</strong><small>Human</small></div></div>

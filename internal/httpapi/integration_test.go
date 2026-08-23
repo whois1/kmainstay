@@ -79,6 +79,17 @@ func TestDirectConversation_IsIdempotentAndValidatesMembers(t *testing.T) {
 	var hector, mary map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &hector)
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Mary"}), http.StatusCreated, &mary)
+
+	var topicConversationIDs []string
+	for _, topic := range []string{"Launch planning", "Launch risks"} {
+		var conversation map[string]any
+		decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": topic, "visibility": "members", "member_ids": []string{hector["id"].(string), mary["id"].(string)}}), http.StatusCreated, &conversation)
+		topicConversationIDs = append(topicConversationIDs, conversation["id"].(string))
+	}
+	if topicConversationIDs[0] == topicConversationIDs[1] {
+		t.Fatalf("same-participant topics reused conversation ID %q", topicConversationIDs[0])
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('legacy-direct',?,'Old Hector title','members',?)`, boot.OrganisationID, now); err != nil {
 		t.Fatal(err)
