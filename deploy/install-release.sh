@@ -49,13 +49,16 @@ mkdir -p "$backup_directory"
 install -d -o kmainstay -g kmainstay -m 0700 "$attachment_directory"
 
 systemctl stop kmainstay
+trap 'systemctl start kmainstay >/dev/null 2>&1 || true' EXIT
 cp --preserve=mode,ownership,timestamps -- "$application_path" "$backup_directory/kmainstay"
 cp --preserve=mode,ownership,timestamps -- "$initialisation_path" "$backup_directory/kmainstay-initialise"
-shopt -s nullglob
-database_files=("$data_directory"/kmainstay.db*)
-if (( ${#database_files[@]} == 0 )); then
+# Do not glob this prefix: the legacy attachment directory used kmainstay.db.uploads.
+database_files=()
+for database_file in "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"; do
+  [[ -f "$database_file" ]] && database_files+=("$database_file")
+done
+if [[ ! -f "$data_directory/kmainstay.db" ]]; then
   printf 'database is missing\n' >&2
-  systemctl start kmainstay
   exit 1
 fi
 cp --preserve=mode,ownership,timestamps -- "${database_files[@]}" "$backup_directory/"
@@ -68,8 +71,12 @@ rollback() {
     systemctl stop kmainstay >/dev/null 2>&1 || true
     install -o root -g root -m 0755 "$backup_directory/kmainstay" "$application_path"
     install -o root -g root -m 0755 "$backup_directory/kmainstay-initialise" "$initialisation_path"
-    rm -f -- "$data_directory"/kmainstay.db*
-    cp --preserve=mode,ownership,timestamps -- "$backup_directory"/kmainstay.db* "$data_directory/"
+    rm -f -- "$data_directory/kmainstay.db" "$data_directory/kmainstay.db-wal" "$data_directory/kmainstay.db-shm"
+    restored_database_files=()
+    for database_file in "$backup_directory/kmainstay.db" "$backup_directory/kmainstay.db-wal" "$backup_directory/kmainstay.db-shm"; do
+      [[ -f "$database_file" ]] && restored_database_files+=("$database_file")
+    done
+    cp --preserve=mode,ownership,timestamps -- "${restored_database_files[@]}" "$data_directory/"
     systemctl start kmainstay || true
   fi
   rm -f -- "$application_upload" "$initialisation_upload"
