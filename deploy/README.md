@@ -9,6 +9,7 @@ Live MVP: <https://170-64-239-198.sslip.io>
 - application: `/opt/kmainstay/kmainstay`
 - initial setup command: `/opt/kmainstay/kmainstay-initialise`
 - SQLite database: `/var/lib/kmainstay/kmainstay.db`
+- image attachments: `/var/lib/kmainstay/uploads/`
 - systemd unit: `/etc/systemd/system/kmainstay.service`
 - Caddy config: `/etc/caddy/Caddyfile`
 - SSH policy: `/etc/ssh/sshd_config.d/99-kmainstay.conf`
@@ -24,7 +25,7 @@ Pushing to `main` runs `.github/workflows/deploy-development.yml`. The workflow:
 3. rebuilds and verifies the committed embedded frontend;
 4. builds stripped Linux AMD64 application and initialisation binaries;
 5. uploads them through the restricted `kmainstay-deploy` SSH account;
-6. verifies checksums, backs up the database and current binaries, restarts the service, and checks local and public health.
+6. verifies checksums, ensures the private uploads directory exists, backs up the database and current binaries, restarts the service, and checks local and public health.
 
 The root-owned `/usr/local/sbin/kmainstay-install-release` script is installed from `deploy/install-release.sh`. It rolls back the binaries and database when the new release fails its local health check, and keeps the ten newest on-server deployment backups.
 
@@ -34,4 +35,4 @@ A deployment can also be started manually from **GitHub → Actions → Test and
 
 ## Data
 
-The SQLite database is the only application state. Back up the database and its WAL consistently before risky changes. No off-server backup destination is configured yet.
+Durable application state consists of the SQLite database and `/var/lib/kmainstay/uploads/`. A valid backup needs a consistent database backup plus the complete uploads directory. The deployment rollback snapshots only the database and binaries; immutable uploads remain in place across rollback. No off-server backup destination is configured yet, so the current deployment is not protected against VPS loss.

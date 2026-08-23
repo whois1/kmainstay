@@ -1,6 +1,33 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { startBot } from './reference-bot.mjs'
+import { downloadAttachment, sendImageMessage, startBot } from './reference-bot.mjs'
+
+test('posts one image through the shared multipart message endpoint', async () => {
+  let request
+  const fetcher = async (url, init) => {
+    request = { url, init }
+    return Response.json({ id: 'message_1' }, { status: 201 })
+  }
+  const image = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+  const message = await sendImageMessage({ baseURL: 'http://example.test', apiKey: 'test-key', conversationID: 'conversation_1', image, filename: 'photo.png', body: 'Caption', clientID: 'client_1', fetcher })
+
+  assert.equal(message.id, 'message_1')
+  assert.equal(request.url, 'http://example.test/api/conversations/conversation_1/messages')
+  assert.equal(request.init.headers.Authorization, 'Bearer test-key')
+  assert.equal(request.init.body.get('body'), 'Caption')
+  assert.equal(request.init.body.get('client_id'), 'client_1')
+  assert.equal(request.init.body.get('image').name, 'photo.png')
+})
+
+test('downloads attachment content with the same bearer key', async () => {
+  const fetcher = async (url, init) => {
+    assert.equal(url, 'https://example.test/api/attachments/attachment/content')
+    assert.equal(init.headers.Authorization, 'Bearer test-key')
+    return new Response(new Uint8Array([1, 2, 3]))
+  }
+  const bytes = await downloadAttachment({ baseURL: 'https://example.test', apiKey: 'test-key', contentURL: '/api/attachments/attachment/content', fetcher })
+  assert.deepEqual(bytes, new Uint8Array([1, 2, 3]))
+})
 
 test('receives a human message event and posts one complete reply', async () => {
   const calls = []

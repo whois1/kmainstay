@@ -18,10 +18,8 @@ One Go process
   ├─ WebSocket event feed
   ├─ embedded Vue application
   ├─ embedded SQL migrations
-  └─ database/sql
-        │
-        ▼
-SQLite database in WAL mode
+  ├─ database/sql ───────────────► SQLite database in WAL mode
+  └─ attachment storage interface ► local immutable files
 ```
 
 Local development does not require Caddy. The Go process and Vite development server are sufficient.
@@ -34,6 +32,7 @@ Local development does not require Caddy. The Go process and Vite development se
 - No ORM initially. Database access stays behind focused Go packages so an ORM or generated query layer can be introduced later if handwritten SQL becomes a demonstrated maintenance cost.
 - WebSocket for realtime event delivery; HTTP for history and mutations.
 - Safe Markdown source stored unchanged and rendered client-side with raw HTML disabled.
+- JPEG and PNG attachment metadata in SQLite, with bytes stored as immutable local files behind a provider-neutral storage key.
 - One systemd-managed binary behind Caddy on one VPS.
 - No Docker.
 
@@ -46,6 +45,7 @@ OrganisationMembership role: admin | member; unique trimmed, NFC-canonicalised a
 Conversation          visibility: organisation | members
 ConversationMember
 Message
+Attachment
 HumanSession
 APIKey
 RealtimeEvent
@@ -88,10 +88,21 @@ Organisation administration deliberately uses only two membership roles. The boo
 - Humans and bots use the same create-message path.
 - Messages are persisted before realtime fan-out.
 - Complete messages only; no response deltas or activity events.
-- Bot-authored events are delivered to other bots.
+- Bot-authored events are not delivered to other bots.
 - The bot runtime decides whether to respond to ordinary messages or mentions.
 - Messages accept bounded Markdown source text.
+- A message may include one JPEG or PNG up to 10 MB; an image-only message may have an empty body.
+- Uploads are signature-checked, fully decoded under bounded concurrency, and dimension-bounded. Filenames are display metadata only and never become storage paths.
+- History and WebSocket events contain attachment metadata and an authorised content URL, never image bytes or Base64.
 - Client-generated idempotency identifiers prevent duplicate sends on retry.
+
+## Attachment storage
+
+The MVP stores attachment metadata, dimensions, byte size and SHA-256 checksum in SQLite. Opaque storage keys resolve to immutable files under `ATTACHMENT_PATH`, which defaults to a directory beside the database. Every content request is authorised through conversation membership; filesystem paths are never public.
+
+The storage package supports save, open and delete by opaque key. Moving to S3-compatible storage later requires copying objects under the same keys and replacing that implementation, not changing message IDs, API URLs, permissions or frontend data shapes. Local deployment uses `/var/lib/kmainstay/uploads` with mode `0700` and object files with mode `0600`.
+
+Deleting a conversation cascades attachment metadata and then removes its objects. A failed object deletion can leave an unreachable orphan and is logged; it must not resurrect or block deletion of the authoritative chat record. Crash-safe writes use a staging file, atomic link and directory sync. On startup, local storage removes only staging files older than 24 hours. Final objects are never inferred to be abandoned merely because they are absent from one database snapshot; that preserves recovery options after restoring either side of the backup pair.
 
 ## Realtime events
 
@@ -131,6 +142,7 @@ Organisation events reach all organisation members. Private-conversation events 
 - short transactions;
 - application-generated IDs and portable UTC timestamps;
 - tested online backup and restore procedure before production reliance.
+- backups and restores must include both the SQLite database and the attachment directory; neither is a complete backup alone.
 
 Do not horizontally scale this design. Move to PostgreSQL if concurrent writes, operations, or availability requirements justify it.
 

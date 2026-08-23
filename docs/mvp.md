@@ -44,6 +44,7 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - admin-only global conversation deletion;
 - chronological messages;
 - safe Markdown rendering, including code blocks;
+- one JPEG or PNG attachment up to 10 MB per message, stored locally behind authorised API access;
 - one copy-once API key per bot initially;
 - HTTP API for history and mutations;
 - WebSocket delivery for new and missed events;
@@ -60,7 +61,7 @@ Bots decide whether to respond. The server does not interpret mentions as mandat
 - roles and fine-grained permissions;
 - API-key scopes;
 - nested threads and replies;
-- files, images, reactions, search, notifications, message editing, and message or file deletion;
+- general files, multiple images, image processing, reactions, search, notifications, message editing, and message or attachment deletion;
 - streaming responses, typing, reasoning, and activity displays;
 - desktop and mobile applications;
 - projects, shared instructions, skills, memory, capabilities, orchestration, and a central brain;
@@ -74,8 +75,8 @@ The MVP slice is complete only when a clean local instance can demonstrate:
 2. login through the Vue web app;
 3. create Hector and copy its API key;
 4. connect a reference bot using only the service URL and key;
-5. exchange Markdown messages in `general` without refreshing;
-6. restart the Go process and retain all durable data;
+5. exchange Markdown and image messages in `general` without refreshing;
+6. restart the Go process and retain the database and attachment bytes;
 7. revoke Hector’s key and observe access denial;
 8. pass backend, frontend, race, type, build, and end-to-end checks.
 

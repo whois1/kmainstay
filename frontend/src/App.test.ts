@@ -126,6 +126,72 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Next')
   })
 
+  it('posts an image-only message as multipart form data', async () => {
+    const attachment = { id: 'attachment', media_type: 'image/png', byte_size: 3, width: 1, height: 1, original_filename: 'photo.png', created_at: '2026-01-01T00:00:00Z', content_url: '/api/attachments/attachment/content' }
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/conversations/c1/messages?limit=100' && !init) return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: '', created_at: '2026-01-01T00:00:00Z', sequence: 1, attachments: [attachment] }, 201)
+      if (url === '/api/conversations/c1/read') return json({ sequence: 1 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    const file = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' })
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await wrapper.get('[data-testid=composer]').trigger('submit')
+    await flushPromises()
+
+    const post = fetcher.mock.calls.find(([url, init]) => url === '/api/conversations/c1/messages' && init?.method === 'POST')
+    expect(post).toBeDefined()
+    const form = post?.[1]?.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    expect(form.get('body')).toBe('')
+    expect(form.get('image')).toBe(file)
+    expect(wrapper.get('[data-testid=message-image]').attributes('src')).toBe(attachment.content_url)
+    expect(wrapper.find('[data-testid=selected-image]').exists()).toBe(false)
+  })
+
+  it('reuses the image message client ID after an ambiguous response failure', async () => {
+    let postCount = 0
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/conversations/c1/messages?limit=100' && !init) return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/messages' && init?.method === 'POST') {
+        postCount++
+        if (postCount === 1) return Promise.reject(new Error('response lost'))
+        return json({ id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: '', created_at: '2026-01-01T00:00:00Z', sequence: 1, attachments: [] }, 200)
+      }
+      if (url === '/api/conversations/c1/read') return json({ sequence: 1 })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+    const file = new File([new Uint8Array([1])], 'photo.png', { type: 'image/png' })
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await wrapper.get('[data-testid=composer]').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('[data-testid=selected-image]').exists()).toBe(true)
+    await wrapper.get('[data-testid=composer]').trigger('submit')
+    await flushPromises()
+
+    const posts = fetcher.mock.calls.filter(([url, init]) => url === '/api/conversations/c1/messages' && init?.method === 'POST')
+    expect(posts).toHaveLength(2)
+    const firstClientID = (posts[0][1]?.body as FormData).get('client_id')
+    const secondClientID = (posts[1][1]?.body as FormData).get('client_id')
+    expect(secondClientID).toBe(firstClientID)
+  })
+
   it('marks through the latest loaded message after initial positioning', async () => {
 	const fetcher = vi.fn()
 	  .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))

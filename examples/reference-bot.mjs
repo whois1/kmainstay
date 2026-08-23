@@ -1,6 +1,26 @@
 import WebSocket from 'ws'
 import { pathToFileURL } from 'node:url'
 
+export async function downloadAttachment({ baseURL, apiKey, contentURL, fetcher = fetch }) {
+  const response = await fetcher(new URL(contentURL, baseURL).toString(), { headers: { Authorization: `Bearer ${apiKey}` } })
+  if (!response.ok) throw new Error(`Attachment download failed (${response.status})`)
+  return new Uint8Array(await response.arrayBuffer())
+}
+
+export async function sendImageMessage({ baseURL, apiKey, conversationID, image, filename, body = '', clientID = crypto.randomUUID(), fetcher = fetch }) {
+  const form = new FormData()
+  form.set('body', body)
+  form.set('client_id', clientID)
+  form.set('image', image, filename)
+  const response = await fetcher(`${baseURL}/api/conversations/${conversationID}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  })
+  if (!response.ok) throw new Error(`Image message failed (${response.status})`)
+  return response.json()
+}
+
 export async function startBot({ baseURL, apiKey, fetcher = fetch, WebSocketImpl = WebSocket, log = console.log }) {
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
   const meResponse = await fetcher(`${baseURL}/api/me`, { headers })

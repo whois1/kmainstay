@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../markdown'
 import type { Conversation, Message, User } from '../types'
 
-const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; busy: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
-const emit = defineEmits<{ deleteConversation: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string] }>()
+const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; image?: File | null; busy: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
+const emit = defineEmits<{ deleteConversation: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
@@ -15,6 +15,9 @@ const mentionStart = ref<number | null>(null)
 const mentionQuery = ref('')
 const activeSuggestion = ref(0)
 const pickerOpen = ref(false)
+const selectedImage = ref<File | null>(props.image ?? null)
+const imageError = ref('')
+const previewURL = ref('')
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
 const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
@@ -33,7 +36,43 @@ let initiallyPositioned = false
 let positionedMessageCount = 0
 
 watch(() => props.composer, value => { draft.value = value })
-watch(() => props.selected?.id, () => closeMentionPicker())
+watch(() => props.image, value => {
+  selectedImage.value = value ?? null
+  updatePreview()
+})
+watch(() => props.selected?.id, () => { closeMentionPicker(); imageError.value = ''; removeImage() })
+
+function selectImage(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  input.value = ''
+  imageError.value = ''
+  if (!file) return
+  if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+    imageError.value = 'Choose one JPEG or PNG up to 10 MB.'
+    return
+  }
+  selectedImage.value = file
+  updatePreview()
+  emit('update:image', file)
+}
+
+function removeImage() {
+  if (!selectedImage.value && !previewURL.value) return
+  selectedImage.value = null
+  imageError.value = ''
+  updatePreview()
+  emit('update:image', null)
+}
+
+function updatePreview() {
+  if (previewURL.value && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(previewURL.value)
+  previewURL.value = selectedImage.value && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(selectedImage.value) : ''
+}
+
+onBeforeUnmount(() => {
+  if (previewURL.value && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(previewURL.value)
+})
 
 function updateComposer(event: Event) {
   const element = event.target as HTMLTextAreaElement
@@ -189,7 +228,7 @@ function handleScroll() {
       <div v-if="message.id === firstUnreadMessageID" data-testid="new-messages-divider" class="new-messages-divider" role="separator" aria-label="New messages"><span>New messages</span></div>
       <article data-testid="message" :data-message-id="message.id">
         <div class="avatar" :class="{ bot: message.author_kind === 'bot' }">{{ message.author_name.slice(0, 1) }}</div>
-        <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></div><div class="markdown" v-html="renderMarkdown(message.body, message.mentions)" /></div>
+        <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time></div><div v-for="attachment in message.attachments ?? []" :key="attachment.id" class="message-image-frame"><img data-testid="message-image" class="message-image" :src="attachment.content_url" :alt="attachment.original_filename" loading="lazy" :width="attachment.width" :height="attachment.height" /></div><div v-if="message.body.trim()" class="markdown" v-html="renderMarkdown(message.body, message.mentions)" /></div>
       </article>
       </template>
     </div>
@@ -200,7 +239,10 @@ function handleScroll() {
           <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
         </ul>
       </div>
-      <button :disabled="removedDirectConversation || busy || !draft.trim()" aria-label="Send message">Send</button><small>{{ removedDirectConversation ? 'This conversation is unavailable' : 'Markdown supported · Enter to send' }}</small>
+      <div v-if="selectedImage" data-testid="selected-image" class="selected-image"><img v-if="previewURL" :src="previewURL" alt="Selected image preview" /><span>{{ selectedImage.name }}</span><button data-testid="remove-image" type="button" aria-label="Remove selected image" @click="removeImage">Remove</button></div>
+      <div class="composer-actions"><label class="image-picker" :class="{ disabled: removedDirectConversation || busy }">Add image<input type="file" accept="image/jpeg,image/png" :disabled="removedDirectConversation || busy" @change="selectImage" /></label><button :disabled="removedDirectConversation || busy || (!draft.trim() && !selectedImage)" aria-label="Send message">Send</button></div>
+      <small>{{ removedDirectConversation ? 'This conversation is unavailable' : 'Markdown and JPEG/PNG images supported · Enter to send' }}</small>
+      <small v-if="imageError" class="image-error" role="alert">{{ imageError }}</small>
       <small v-if="(users ?? []).some(user => user.kind === 'bot')" data-testid="bot-guidance">{{ directBot ? `${directBot.name} responds automatically in this private chat.` : 'Bots respond when you @mention them.' }}</small>
     </form>
     <p v-if="error" class="toast error" role="alert">{{ error }}</p>

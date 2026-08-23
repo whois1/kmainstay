@@ -23,6 +23,8 @@ const jumpToLatestVersion = ref(0)
 const email = ref('')
 const password = ref('')
 const composer = ref('')
+const image = ref<File | null>(null)
+const pendingMessageClientID = ref('')
 const error = ref('')
 const busy = ref(false)
 const activeView = ref<'chat' | 'settings'>('chat')
@@ -106,6 +108,8 @@ async function selectConversation(conversation: Conversation) {
   const selectionGeneration = ++conversationSelectionGeneration
   const loadGeneration = ++messageLoadGeneration
   selected.value = conversation
+  image.value = null
+  pendingMessageClientID.value = ''
   messages.value = []
   hasNewerMessages.value = false
   loadingConversationID = conversation.id
@@ -185,15 +189,38 @@ function mergeMessages(loadedMessages: Message[], realtimeMessages: Message[]) {
   return [...messagesByID.values()].sort((left, right) => left.sequence - right.sequence)
 }
 
+function updateComposerDraft(value: string) {
+  if (value !== composer.value) pendingMessageClientID.value = ''
+  composer.value = value
+}
+
+function updateImageDraft(value: File | null) {
+  if (value !== image.value) pendingMessageClientID.value = ''
+  image.value = value
+}
+
 async function sendMessage() {
-  if (!composer.value.trim() || !selected.value || busy.value) return
+  if ((!composer.value.trim() && !image.value) || !selected.value || busy.value) return
   const body = composer.value
+  const selectedImage = image.value
   const conversationID = selected.value.id
   const selectionGeneration = conversationSelectionGeneration
   const isCurrentConversation = () => selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversationID && conversations.value.some(({ id }) => id === conversationID)
-  composer.value = ''; busy.value = true; error.value = ''
+  const clientID = pendingMessageClientID.value || crypto.randomUUID()
+  composer.value = ''; image.value = null; busy.value = true; error.value = ''
   try {
-    const message = await request<Message>(`/api/conversations/${conversationID}/messages`, jsonInit('POST', { body, client_id: crypto.randomUUID() }))
+    let init: RequestInit
+    if (selectedImage) {
+      const form = new FormData()
+      form.set('body', body)
+      form.set('client_id', clientID)
+      form.set('image', selectedImage)
+      init = { method: 'POST', body: form }
+    } else {
+      init = jsonInit('POST', { body, client_id: clientID })
+    }
+    const message = await request<Message>(`/api/conversations/${conversationID}/messages`, init)
+    if (pendingMessageClientID.value === clientID) pendingMessageClientID.value = ''
     if (isCurrentConversation()) {
       selected.value!.read_sequence = Math.max(selected.value!.read_sequence ?? 0, message.sequence)
       selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
@@ -202,7 +229,9 @@ async function sendMessage() {
     }
   } catch (cause) {
     if (isCurrentConversation()) {
+      pendingMessageClientID.value = clientID
       composer.value = body
+      image.value = selectedImage
       error.value = messageOf(cause)
     }
   } finally { busy.value = false }
@@ -448,7 +477,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" v-model:composer="composer" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @delete-conversation="deleteSelectedConversation" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

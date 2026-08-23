@@ -6,11 +6,18 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +27,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"kmainstay/internal/app"
+	"kmainstay/internal/attachments"
 	"kmainstay/internal/database"
 	"kmainstay/internal/httpapi"
 )
@@ -875,6 +883,234 @@ func TestRemoveBot_RequiresAdminRevokesAccessAndPreservesMessages(t *testing.T) 
 	var authorName string
 	if err := db.QueryRow(`SELECT u.name FROM messages m JOIN users u ON u.id=m.author_id WHERE m.client_id='before-removal'`).Scan(&authorName); err != nil || authorName != "Hector" {
 		t.Fatalf("preserved author = %q, err=%v", authorName, err)
+	}
+}
+
+func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-image.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRoot := filepath.Join(t.TempDir(), "uploads")
+	store, err := attachments.NewFilesystem(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db, Attachments: store}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	socket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Cookie": {sessionCookieFor(t, client, server.URL).String()}})
+	defer socket.CloseNow()
+
+	var imageBytes bytes.Buffer
+	pixel := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	pixel.Set(0, 0, color.RGBA{R: 255, A: 255})
+	if err := png.Encode(&imageBytes, pixel); err != nil {
+		t.Fatal(err)
+	}
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	_ = writer.WriteField("body", "")
+	_ = writer.WriteField("client_id", "image-message")
+	partHeaders := make(textproto.MIMEHeader)
+	partHeaders.Set("Content-Disposition", `form-data; name="image"; filename="red.png"`)
+	partHeaders.Set("Content-Type", "image/png")
+	part, err := writer.CreatePart(partHeaders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write(imageBytes.Bytes())
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Origin", server.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message map[string]any
+	decodeResponse(t, response, http.StatusCreated, &message)
+	items, ok := message["attachments"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("attachments = %#v", message["attachments"])
+	}
+	attachment := items[0].(map[string]any)
+	if attachment["media_type"] != "image/png" || attachment["original_filename"] != "red.png" || attachment["width"] != float64(2) || attachment["height"] != float64(1) {
+		t.Fatalf("attachment = %#v", attachment)
+	}
+	var retryBody bytes.Buffer
+	retryWriter := multipart.NewWriter(&retryBody)
+	_ = retryWriter.WriteField("client_id", "image-message")
+	retryPartHeaders := make(textproto.MIMEHeader)
+	retryPartHeaders.Set("Content-Disposition", `form-data; name="image"; filename="retry.png"`)
+	retryPartHeaders.Set("Content-Type", "image/png")
+	retryPart, _ := retryWriter.CreatePart(retryPartHeaders)
+	_, _ = retryPart.Write(imageBytes.Bytes())
+	_ = retryWriter.Close()
+	retryRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &retryBody)
+	retryRequest.Header.Set("Content-Type", retryWriter.FormDataContentType())
+	retryRequest.Header.Set("Origin", server.URL)
+	retryResponse, err := client.Do(retryRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retriedMessage map[string]any
+	decodeResponse(t, retryResponse, http.StatusOK, &retriedMessage)
+	retriedAttachment := retriedMessage["attachments"].([]any)[0].(map[string]any)
+	files, err := os.ReadDir(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriedAttachment["id"] != attachment["id"] || len(files) != 1 {
+		t.Fatalf("retry attachment=%#v files=%d", retriedAttachment, len(files))
+	}
+	event := readEvent(t, socket)
+	payload := event["payload"].(map[string]any)
+	if event["type"] != "message.created" || len(payload["attachments"].([]any)) != 1 {
+		t.Fatalf("event = %#v", event)
+	}
+	contentResponse, err := client.Get(server.URL + attachment["content_url"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(contentResponse.Body)
+	contentResponse.Body.Close()
+	if err != nil || contentResponse.StatusCode != http.StatusOK || !bytes.Equal(content, imageBytes.Bytes()) {
+		t.Fatalf("content status=%d bytes=%d err=%v", contentResponse.StatusCode, len(content), err)
+	}
+	if contentResponse.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", contentResponse.Header.Get("X-Content-Type-Options"))
+	}
+	if contentResponse.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", contentResponse.Header.Get("Cache-Control"))
+	}
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	botRequest, _ := http.NewRequest(http.MethodGet, server.URL+attachment["content_url"].(string), nil)
+	botRequest.Header.Set("Authorization", "Bearer "+bot["api_key"].(string))
+	botResponse, err := http.DefaultClient.Do(botRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	botContent, err := io.ReadAll(botResponse.Body)
+	botResponse.Body.Close()
+	if err != nil || botResponse.StatusCode != http.StatusOK || !bytes.Equal(botContent, imageBytes.Bytes()) {
+		t.Fatalf("bot content status=%d bytes=%d err=%v", botResponse.StatusCode, len(botContent), err)
+	}
+	unauthorised, err := http.Get(server.URL + attachment["content_url"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unauthorised.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorised status = %d", unauthorised.StatusCode)
+	}
+	unauthorised.Body.Close()
+	var history []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", "", nil), http.StatusOK, &history)
+	if len(history) != 1 || len(history[0]["attachments"].([]any)) != 1 {
+		t.Fatalf("history = %#v", history)
+	}
+	var storageKey string
+	if err := db.QueryRow(`SELECT storage_key FROM attachments WHERE id=?`, attachment["id"]).Scan(&storageKey); err != nil {
+		t.Fatal(err)
+	}
+	deleted := requestJSON(t, client, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+boot.ConversationID, server.URL, "", nil)
+	if deleted.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d: %s", deleted.StatusCode, readBody(deleted))
+	}
+	deleted.Body.Close()
+	if reader, err := store.Open(storageKey); err == nil {
+		reader.Close()
+		t.Fatal("attachment file remains after conversation deletion")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("open deleted attachment: %v", err)
+	}
+}
+
+func TestMessageImage_RejectsDeclaredMediaTypeMismatchWithoutPersistingData(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "invalid-image.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRoot := filepath.Join(t.TempDir(), "uploads")
+	store, err := attachments.NewFilesystem(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db, Attachments: store}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	_ = writer.WriteField("client_id", "invalid-image")
+	partHeaders := make(textproto.MIMEHeader)
+	partHeaders.Set("Content-Disposition", `form-data; name="image"; filename="fake.jpg"`)
+	partHeaders.Set("Content-Type", "image/jpeg")
+	part, _ := writer.CreatePart(partHeaders)
+	var actualPNG bytes.Buffer
+	_ = png.Encode(&actualPNG, image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	_, _ = part.Write(actualPNG.Bytes())
+	_ = writer.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &requestBody)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Origin", server.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	var truncatedBody bytes.Buffer
+	truncatedWriter := multipart.NewWriter(&truncatedBody)
+	truncatedHeaders := make(textproto.MIMEHeader)
+	truncatedHeaders.Set("Content-Disposition", `form-data; name="image"; filename="truncated.png"`)
+	truncatedHeaders.Set("Content-Type", "image/png")
+	truncatedPart, _ := truncatedWriter.CreatePart(truncatedHeaders)
+	_, _ = truncatedPart.Write(actualPNG.Bytes()[:33])
+	_ = truncatedWriter.Close()
+	truncatedRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &truncatedBody)
+	truncatedRequest.Header.Set("Content-Type", truncatedWriter.FormDataContentType())
+	truncatedRequest.Header.Set("Origin", server.URL)
+	truncatedResponse, err := client.Do(truncatedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncatedResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("truncated status = %d, want 400: %s", truncatedResponse.StatusCode, readBody(truncatedResponse))
+	}
+	truncatedResponse.Body.Close()
+	var messages, storedAttachments int
+	if err := db.QueryRow(`SELECT count(*) FROM messages`).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM attachments`).Scan(&storedAttachments); err != nil {
+		t.Fatal(err)
+	}
+	files, err := os.ReadDir(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 || storedAttachments != 0 || len(files) != 0 {
+		t.Fatalf("messages=%d attachments=%d files=%d", messages, storedAttachments, len(files))
 	}
 }
 

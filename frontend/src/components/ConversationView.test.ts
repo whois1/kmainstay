@@ -15,6 +15,43 @@ const users: User[] = [
 ]
 
 describe('ConversationView', () => {
+  it('renders authorised image attachments inline', () => {
+    const imageMessage = {
+      ...messages[0],
+      body: '',
+      attachments: [{ id: 'attachment', media_type: 'image/png' as const, byte_size: 12, width: 2, height: 1, original_filename: 'red.png', created_at: '2026-01-01T00:00:00Z', content_url: '/api/attachments/attachment/content' }],
+    }
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [imageMessage], composer: '', busy: false, error: '', canDelete: false } })
+    const image = wrapper.get('[data-testid=message-image]')
+    expect(image.attributes('src')).toBe('/api/attachments/attachment/content')
+    expect(image.attributes('alt')).toBe('red.png')
+    expect(image.attributes('loading')).toBe('lazy')
+    expect(wrapper.find('.markdown').exists()).toBe(false)
+  })
+
+  it('selects and removes one JPEG or PNG from the composer', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const file = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' })
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
+    expect(wrapper.get('[data-testid=selected-image]').text()).toContain('photo.png')
+    await wrapper.get('[data-testid=remove-image]').trigger('click')
+    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([null])
+  })
+
+  it('clears an invalid image error when changing conversations', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const invalid = new File([new Uint8Array([1])], 'document.svg', { type: 'image/svg+xml' })
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [invalid] })
+    await input.trigger('change')
+    expect(wrapper.find('[role=alert]').exists()).toBe(true)
+    await wrapper.setProps({ selected: { ...conversation, id: 'other' } })
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
+  })
+
   it('filters mention suggestions and provides accessible keyboard selection', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
     const textarea = wrapper.get('textarea')

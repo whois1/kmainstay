@@ -8,6 +8,7 @@ readonly expected_initialisation_sha256=${4:-}
 readonly application_path=/opt/kmainstay/kmainstay
 readonly initialisation_path=/opt/kmainstay/kmainstay-initialise
 readonly data_directory=/var/lib/kmainstay
+readonly attachment_directory="$data_directory/uploads"
 readonly backup_root=/var/lib/kmainstay/deployment-backups
 readonly health_url=http://127.0.0.1:8080/healthz
 readonly deploy_home=/home/kmainstay-deploy
@@ -45,6 +46,7 @@ flock -n 9 || { printf 'another deployment is running\n' >&2; exit 1; }
 readonly deployed_at=$(date -u +%Y%m%dT%H%M%SZ)
 readonly backup_directory="$backup_root/$deployed_at"
 mkdir -p "$backup_directory"
+install -d -o kmainstay -g kmainstay -m 0700 "$attachment_directory"
 
 systemctl stop kmainstay
 cp --preserve=mode,ownership,timestamps -- "$application_path" "$backup_directory/kmainstay"

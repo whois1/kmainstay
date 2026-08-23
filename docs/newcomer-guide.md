@@ -27,6 +27,7 @@ cmd/
   kmainstay-initialise/       one-time bootstrap command
 internal/
   app/                        bootstrap use case
+  attachments/                provider-neutral immutable file storage
   auth/                       password and secret hashing
   database/                   SQLite opening, migrations and IDs
   httpapi/                    routing, auth, authorisation, messages and WebSockets
@@ -50,8 +51,8 @@ Browser or bot
 Caddy
     → HTTP on 127.0.0.1:8080
 One Go process
-    → explicit SQL through database/sql
-SQLite in WAL mode
+    → explicit SQL through database/sql → SQLite in WAL mode
+    → attachment storage interface → local upload files
 ```
 
 The Go binary embeds both SQL migrations and the built Vue files. Deployment therefore replaces one application binary; Caddy and SQLite remain separate operating concerns.
@@ -63,7 +64,8 @@ The Go binary embeds both SQL migrations and the built Vue files. Deployment the
 - **Organisation membership**: links a user to an organisation with `admin` or `member` role.
 - **Conversation**: organisation-wide or restricted to explicit members.
 - **Conversation membership**: grants access to a private conversation.
-- **Message**: immutable authored Markdown source with an optional idempotency identifier.
+- **Message**: immutable authored Markdown source with an optional idempotency identifier and at most one image attachment.
+- **Attachment**: authorised metadata in SQLite pointing to immutable bytes through an opaque storage key.
 - **Human session**: opaque, expiring server-side login session.
 - **API key**: bot credential with a public lookup and hashed secret verifier.
 - **Realtime event**: durable increasing sequence pointing to a persisted message.

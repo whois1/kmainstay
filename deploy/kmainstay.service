@@ -9,6 +9,7 @@ User=kmainstay
 Group=kmainstay
 WorkingDirectory=/var/lib/kmainstay
 Environment=DB_PATH=/var/lib/kmainstay/kmainstay.db
+Environment=ATTACHMENT_PATH=/var/lib/kmainstay/uploads
 Environment=LISTEN_ADDR=127.0.0.1:8080
 ExecStart=/opt/kmainstay/kmainstay
 Restart=on-failure

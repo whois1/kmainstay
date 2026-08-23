@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"kmainstay/internal/attachments"
 	"kmainstay/internal/auth"
 	"kmainstay/internal/database"
 )
@@ -29,16 +32,19 @@ type Dependencies struct {
 	SecureCookies  bool
 	AllowedOrigins []string
 	Assets         http.Handler
+	Attachments    attachments.Store
 }
 
 type server struct {
-	db             *sql.DB
-	secureCookies  bool
-	allowedOrigins map[string]bool
-	hub            *hub
-	mu             sync.Mutex
-	lastMessage    map[string][]time.Time
-	loginLimiter   *loginLimiter
+	db               *sql.DB
+	secureCookies    bool
+	allowedOrigins   map[string]bool
+	hub              *hub
+	mu               sync.Mutex
+	lastMessage      map[string][]time.Time
+	loginLimiter     *loginLimiter
+	attachments      attachments.Store
+	imageUploadSlots chan struct{}
 }
 
 type principal struct {
@@ -50,7 +56,7 @@ type principal struct {
 type contextKey struct{}
 
 func New(deps Dependencies) http.Handler {
-	s := &server{db: deps.DB, secureCookies: deps.SecureCookies, allowedOrigins: map[string]bool{}, hub: newHub(), lastMessage: map[string][]time.Time{}, loginLimiter: newLoginLimiter(5, time.Minute, 1024)}
+	s := &server{db: deps.DB, secureCookies: deps.SecureCookies, allowedOrigins: map[string]bool{}, hub: newHub(), lastMessage: map[string][]time.Time{}, loginLimiter: newLoginLimiter(5, time.Minute, 1024), attachments: deps.Attachments, imageUploadSlots: make(chan struct{}, 2)}
 	for _, origin := range deps.AllowedOrigins {
 		s.allowedOrigins[origin] = true
 	}
@@ -74,6 +80,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("DELETE /api/bots/{bot}/key", s.withAuth(http.HandlerFunc(s.revokeBotKey)))
 		mux.Handle("GET /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.messages)))
 		mux.Handle("POST /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.postMessage)))
+		mux.Handle("GET /api/attachments/{attachment}/content", s.withAuth(http.HandlerFunc(s.attachmentContent)))
 		mux.Handle("PUT /api/conversations/{conversation}/read", s.withAuth(http.HandlerFunc(s.putConversationRead)))
 		mux.Handle("GET /api/ws", s.withAuth(http.HandlerFunc(s.webSocket)))
 	}
@@ -401,7 +408,36 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
-	result, err := s.db.ExecContext(r.Context(), `DELETE FROM conversations
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	defer tx.Rollback()
+	storageKeys := []string{}
+	if s.attachments != nil {
+		rows, err := tx.QueryContext(r.Context(), `SELECT attachment.storage_key FROM attachments attachment JOIN messages message ON message.id=attachment.message_id WHERE message.conversation_id=?`, r.PathValue("conversation"))
+		if err != nil {
+			returnServerError(w)
+			return
+		}
+		for rows.Next() {
+			var storageKey string
+			if err := rows.Scan(&storageKey); err != nil {
+				rows.Close()
+				returnServerError(w)
+				return
+			}
+			storageKeys = append(storageKeys, storageKey)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			returnServerError(w)
+			return
+		}
+		rows.Close()
+	}
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM conversations
 		WHERE id=? AND organisation_id=?
 		AND EXISTS(SELECT 1 FROM organisation_memberships
 			WHERE organisation_id=? AND user_id=? AND role='admin')`,
@@ -418,6 +454,15 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	if affected != 1 {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
+	}
+	if err := tx.Commit(); err != nil {
+		returnServerError(w)
+		return
+	}
+	for _, storageKey := range storageKeys {
+		if err := s.attachments.Delete(storageKey); err != nil {
+			log.Printf("delete attachment object: %v", err)
+		}
 	}
 	s.hub.publishConversationDeleted(r.PathValue("organisation"), r.PathValue("conversation"))
 	w.WriteHeader(http.StatusNoContent)
@@ -734,6 +779,7 @@ type message struct {
 	CreatedAt      string          `json:"created_at"`
 	Sequence       int64           `json:"sequence"`
 	Mentions       []mentionedUser `json:"mentions"`
+	Attachments    []attachment    `json:"attachments"`
 }
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
@@ -806,6 +852,11 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 			returnServerError(w)
 			return
 		}
+		items[index].Attachments, err = s.messageAttachments(r.Context(), items[index].ID)
+		if err != nil {
+			returnServerError(w)
+			return
+		}
 	}
 	writeJSON(w, 200, items)
 }
@@ -821,25 +872,38 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 429, "rate limit exceeded")
 		return
 	}
-	var in struct {
-		Body     string `json:"body"`
-		ClientID string `json:"client_id"`
-	}
-	if !decode(w, r, &in) {
+	in, ok := s.decodeMessageInput(w, r)
+	if !ok {
 		return
 	}
-	if strings.TrimSpace(in.Body) == "" || len(in.Body) > 20000 || len(in.ClientID) > 200 {
+	if (strings.TrimSpace(in.Body) == "" && in.Attachment == nil) || len(in.Body) > 20000 || len(in.ClientID) > 200 {
 		writeError(w, 400, "invalid message")
 		return
 	}
-	m, created, err := s.insertMessage(r.Context(), conversationID, p, in.Body, in.ClientID)
+	if in.Attachment != nil {
+		if s.attachments == nil {
+			returnServerError(w)
+			return
+		}
+		if err := s.attachments.Save(in.Attachment.StorageKey, bytes.NewReader(in.Attachment.Bytes)); err != nil {
+			returnServerError(w)
+			return
+		}
+	}
+	m, created, err := s.insertMessageWithAttachment(r.Context(), conversationID, p, in.Body, in.ClientID, in.Attachment)
 	if err != nil {
+		if in.Attachment != nil {
+			_ = s.attachments.Delete(in.Attachment.StorageKey)
+		}
 		if errors.Is(err, errMessageAccessDenied) {
 			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
 		returnServerError(w)
 		return
+	}
+	if !created && in.Attachment != nil {
+		_ = s.attachments.Delete(in.Attachment.StorageKey)
 	}
 	if created {
 		s.hub.publish(m.Sequence)
@@ -902,12 +966,16 @@ func (s *server) putConversationRead(w http.ResponseWriter, r *http.Request) {
 var errMessageAccessDenied = errors.New("message access denied")
 
 func (s *server) insertMessage(ctx context.Context, conversationID string, p principal, body, clientID string) (message, bool, error) {
+	return s.insertMessageWithAttachment(ctx, conversationID, p, body, clientID, nil)
+}
+
+func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID string, p principal, body, clientID string, pending *pendingAttachment) (message, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return message{}, false, err
 	}
 	defer tx.Rollback()
-	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText(), Mentions: []mentionedUser{}}
+	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText(), Mentions: []mentionedUser{}, Attachments: []attachment{}}
 	result, insertErr := tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at)
 		SELECT ?,c.id,?,?,nullif(?,''),?
 		FROM conversations c
@@ -936,6 +1004,10 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 					AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
 			if e == nil {
 				existing.Mentions, e = messageMentionsInTransaction(ctx, tx, existing.ID)
+				if e != nil {
+					return message{}, false, e
+				}
+				existing.Attachments, e = queryMessageAttachments(ctx, tx, existing.ID)
 				if e != nil {
 					return message{}, false, e
 				}
@@ -1012,6 +1084,14 @@ func (s *server) insertMessage(ctx context.Context, conversationID string, p pri
 		return message{}, false, err
 	}
 	m.Sequence, _ = res.LastInsertId()
+	if pending != nil {
+		pending.MessageID = m.ID
+		pending.CreatedAt = m.CreatedAt
+		if _, err = tx.ExecContext(ctx, `INSERT INTO attachments(id,message_id,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, pending.ID, pending.MessageID, pending.StorageKey, pending.MediaType, pending.ByteSize, pending.Width, pending.Height, pending.OriginalFilename, pending.SHA256, pending.CreatedAt); err != nil {
+			return message{}, false, err
+		}
+		m.Attachments = []attachment{pending.attachment}
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at)
 		VALUES(?,?,?,?)
 		ON CONFLICT(user_id,conversation_id) DO UPDATE SET sequence=max(sequence,excluded.sequence),updated_at=excluded.updated_at`, p.ID, conversationID, m.Sequence, m.CreatedAt); err != nil {
@@ -1028,6 +1108,9 @@ func (s *server) messageByClient(ctx context.Context, conversationID, authorID, 
 	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?`, conversationID, authorID, clientID).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
 	if err == nil {
 		m.Mentions, err = s.messageMentions(ctx, m.ID)
+	}
+	if err == nil {
+		m.Attachments, err = s.messageAttachments(ctx, m.ID)
 	}
 	return m, err
 }
@@ -1166,6 +1249,9 @@ func (s *server) eventFor(ctx context.Context, seq int64, target principal) (mes
 		AND `+botDeliveryCondition, target.ID, seq).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
 	if err == nil {
 		m.Mentions, err = s.messageMentions(ctx, m.ID)
+	}
+	if err == nil {
+		m.Attachments, err = s.messageAttachments(ctx, m.ID)
 	}
 	return m, err
 }

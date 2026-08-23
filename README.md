@@ -49,7 +49,7 @@ Build and verify one complete path:
 3. create Hector as a bot user;
 4. copy its one-time API key;
 5. connect a reference bot;
-6. exchange safe-Markdown messages through the web application;
+6. exchange safe-Markdown and image messages through the web application;
 7. verify persistence after restart and denial after key revocation.
 
 ## Run locally
@@ -64,7 +64,7 @@ go build -o ./bin/kmainstay-initialise ./cmd/kmainstay-initialise
 printf '%s\n' 'choose-a-long-password' | DB_PATH=./kmainstay.db \
   BOOTSTRAP_EMAIL=michael@example.com BOOTSTRAP_NAME=Michael \
   BOOTSTRAP_ORGANISATION=Mainstay ./bin/kmainstay-initialise
-DB_PATH=./kmainstay.db LISTEN_ADDR=:8080 INSECURE_COOKIES=1 ./bin/kmainstay
+DB_PATH=./kmainstay.db ATTACHMENT_PATH=./kmainstay.uploads LISTEN_ADDR=:8080 INSECURE_COOKIES=1 ./bin/kmainstay
 ```
 
 Open <http://localhost:8080>. `INSECURE_COOKIES=1` is for local HTTP only; omit it behind HTTPS. For frontend development, run `npm run dev`; Vite proxies API and WebSocket requests to port 8080.
