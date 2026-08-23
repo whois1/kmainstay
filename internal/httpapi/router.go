@@ -70,6 +70,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("GET /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.conversations)))
 		mux.Handle("POST /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.createConversation)))
 		mux.Handle("POST /api/organisations/{organisation}/direct-conversations/{user}", s.withAuth(http.HandlerFunc(s.directConversation)))
+		mux.Handle("PUT /api/conversations/{conversation}/title", s.withAuth(http.HandlerFunc(s.updateConversationTitle)))
 		mux.Handle("DELETE /api/organisations/{organisation}/conversations/{conversation}", s.withAuth(http.HandlerFunc(s.deleteConversation)))
 		mux.Handle("GET /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.users)))
 		mux.Handle("POST /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.addOrganisationUser)))
@@ -213,7 +214,8 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,coalesce(c.title,c.name),c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at),c.title_automatic,
 		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
@@ -221,7 +223,9 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 		WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR (
 			(SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=c.id)>=2
 			AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)))
-		ORDER BY c.created_at,c.id`, r.PathValue("organisation"), current(r).ID, current(r).ID)
+		ORDER BY julianday(coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at)) DESC,
+		coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0) DESC,
+		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at) DESC,c.id DESC`, r.PathValue("organisation"), current(r).ID, current(r).ID)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -229,12 +233,13 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, name, visibility, memberIDsJSON string
+		var id, name, visibility, activityAt, memberIDsJSON string
 		var readSequence, latestSequence int64
-		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &memberIDsJSON) == nil {
+		var titleAutomatic bool
+		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON) == nil {
 			var memberIDs []string
 			_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence})
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -269,9 +274,10 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Name       string   `json:"name"`
-		Visibility string   `json:"visibility"`
-		MemberIDs  []string `json:"member_ids"`
+		Name           string   `json:"name"`
+		Visibility     string   `json:"visibility"`
+		MemberIDs      []string `json:"member_ids"`
+		AutomaticTitle bool     `json:"automatic_title"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -288,7 +294,11 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	id, now := database.NewID("con"), nowText()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,?,?,?,?)`, id, orgID, in.Name, in.Visibility, now); err != nil {
+	internalName := in.Name
+	if in.AutomaticTitle {
+		internalName = "topic:" + id
+	}
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,title,title_automatic,visibility,created_at) VALUES(?,?,?,?,?,?,?)`, id, orgID, internalName, in.Name, in.AutomaticTitle, in.Visibility, now); err != nil {
 		writeError(w, http.StatusConflict, "conversation already exists")
 		return
 	}
@@ -321,7 +331,41 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
+}
+
+func (s *server) updateConversationTitle(w http.ResponseWriter, r *http.Request) {
+	conversationID := r.PathValue("conversation")
+	var input struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" || len(input.Name) > 20000 {
+		writeError(w, http.StatusBadRequest, "invalid title")
+		return
+	}
+	principalID := current(r).ID
+	result, err := s.db.ExecContext(r.Context(), `UPDATE conversations SET title=?,title_automatic=0
+		WHERE id=?
+		AND EXISTS(SELECT 1 FROM organisation_memberships membership WHERE membership.organisation_id=conversations.organisation_id AND membership.user_id=?)
+		AND (visibility='organisation' OR (
+			EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=conversations.id AND member.user_id=?)
+			AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=conversations.id)>=2))`, input.Name, conversationID, principalID, principalID)
+	if err != nil {
+		returnServerError(w)
+		return
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
+		returnServerError(w)
+		return
+	} else if affected != 1 {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": conversationID, "name": input.Name, "title_automatic": false})
 }
 
 func (s *server) directConversation(w http.ResponseWriter, r *http.Request) {
@@ -386,9 +430,11 @@ func (s *server) directConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) exactDirectConversation(ctx context.Context, organisationID, currentUserID, otherUserID string) (map[string]any, error) {
-	var id, name, visibility, memberIDsJSON string
+	var id, name, visibility, activityAt, memberIDsJSON string
 	var readSequence, latestSequence int64
-	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.name,c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+	var titleAutomatic bool
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,coalesce(c.title,c.name),c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at),c.title_automatic,
 		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
 		FROM conversations c
 		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=?
@@ -396,13 +442,13 @@ func (s *server) exactDirectConversation(ctx context.Context, organisationID, cu
 		AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=c.id)=2
 		AND EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=c.id AND member.user_id=?)
 		AND EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=c.id AND member.user_id=?)
-		ORDER BY coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0) DESC,c.created_at DESC,c.id DESC LIMIT 1`, currentUserID, organisationID, currentUserID, otherUserID).Scan(&id, &name, &visibility, &readSequence, &latestSequence, &memberIDsJSON)
+		ORDER BY coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0) DESC,c.created_at DESC,c.id DESC LIMIT 1`, currentUserID, organisationID, currentUserID, otherUserID).Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON)
 	if err != nil {
 		return nil, err
 	}
 	var memberIDs []string
 	_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence}, nil
+	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
@@ -1027,6 +1073,33 @@ func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID
 			}
 		}
 		return message{}, false, insertErr
+	}
+	if title := strings.TrimSpace(body); title != "" {
+		priorBodies, queryErr := tx.QueryContext(ctx, `SELECT body FROM messages WHERE conversation_id=? AND id<>?`, conversationID, m.ID)
+		if queryErr != nil {
+			return message{}, false, queryErr
+		}
+		hasPriorText := false
+		for priorBodies.Next() {
+			var priorBody string
+			if scanErr := priorBodies.Scan(&priorBody); scanErr != nil {
+				priorBodies.Close()
+				return message{}, false, scanErr
+			}
+			if strings.TrimSpace(priorBody) != "" {
+				hasPriorText = true
+			}
+		}
+		if rowsErr := priorBodies.Err(); rowsErr != nil {
+			priorBodies.Close()
+			return message{}, false, rowsErr
+		}
+		priorBodies.Close()
+		if !hasPriorText {
+			if _, err = tx.ExecContext(ctx, `UPDATE conversations SET title=?,title_automatic=0 WHERE id=? AND title_automatic=1`, title, conversationID); err != nil {
+				return message{}, false, err
+			}
+		}
 	}
 	var orgID string
 	if err = tx.QueryRowContext(ctx, `SELECT organisation_id FROM conversations WHERE id=?`, conversationID).Scan(&orgID); err != nil {

@@ -30,7 +30,7 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 }
@@ -262,7 +262,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string

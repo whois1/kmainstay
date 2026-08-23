@@ -3,8 +3,8 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../markdown'
 import type { Conversation, Message, User } from '../types'
 
-const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; image?: File | null; busy: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
-const emit = defineEmits<{ deleteConversation: []; newTopic: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
+const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; image?: File | null; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number }>()
+const emit = defineEmits<{ deleteConversation: []; newTopic: []; updateTitle: [name: string]; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
@@ -18,6 +18,8 @@ const pickerOpen = ref(false)
 const selectedImage = ref<File | null>(props.image ?? null)
 const imageError = ref('')
 const previewURL = ref('')
+const editingTitle = ref(false)
+const titleDraft = ref('')
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
 const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
@@ -54,7 +56,19 @@ watch(() => props.image, value => {
   selectedImage.value = value ?? null
 })
 watch(selectedImage, updatePreview, { immediate: true })
-watch(() => props.selected?.id, () => { closeMentionPicker(); imageError.value = ''; removeImage() })
+watch(() => props.selected?.id, () => { closeMentionPicker(); imageError.value = ''; editingTitle.value = false; removeImage() })
+
+function beginTitleEdit() {
+  titleDraft.value = conversationDisplayName.value
+  editingTitle.value = true
+}
+
+function submitTitle() {
+  const name = titleDraft.value.trim()
+  if (!name) return
+  emit('updateTitle', name)
+  editingTitle.value = false
+}
 
 function selectImage(event: Event) {
   const input = event.target as HTMLInputElement
@@ -255,7 +269,11 @@ function handleScroll() {
 <template>
   <section class="conversation" aria-label="Conversation">
     <header v-if="selected">
-      <div><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><p>{{ conversationContext }}</p></div>
+      <div>
+        <form v-if="editingTitle" data-testid="conversation-title-form" class="conversation-title-form" @submit.prevent="submitTitle"><input data-testid="conversation-title-input" v-model="titleDraft" aria-label="Conversation title" required><button type="submit">Save</button><button type="button" class="secondary" @click="editingTitle = false">Cancel</button></form>
+        <div v-else class="conversation-title-row"><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><button v-if="!removedDirectConversation" data-testid="edit-conversation-title" class="title-edit" type="button" aria-label="Edit conversation title" :disabled="titleBusy" @click="beginTitleEdit">{{ titleBusy ? 'Saving…' : 'Edit' }}</button></div>
+        <p>{{ conversationContext }}</p>
+      </div>
       <div class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button></div>
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>

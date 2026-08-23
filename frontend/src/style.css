@@ -93,6 +93,10 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .conversation > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 76px; padding: 16px max(24px, calc((100% - 840px) / 2)); border-bottom: 1px solid var(--border); }
 .conversation-header-actions { display: flex; align-items: center; gap: 8px; }
 .conversation-header-actions button { white-space: nowrap; }
+.conversation-title-row, .conversation-title-form { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.conversation-title-row h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-title-form input { min-width: 180px; }
+.title-edit { min-height: 28px; padding: 4px 8px; border-color: var(--border); background: transparent; color: var(--secondary); }
 .conversation h1 { margin-bottom: 2px; font-size: 20px; }
 .conversation header p, .settings-header p, .settings-section-heading p, .settings-note, .empty-state p { margin: 0; color: var(--secondary); font-size: 13px; }
 .message-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }

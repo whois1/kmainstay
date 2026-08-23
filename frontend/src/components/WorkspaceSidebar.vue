@@ -20,27 +20,32 @@ const emit = defineEmits<{
   selectConversation: [conversation: Conversation]
 }>()
 
-function byLatestMessage(left: Conversation, right: Conversation) {
+function byLatestActivity(left: Conversation, right: Conversation) {
+  if (left.activity_at && right.activity_at && left.activity_at !== right.activity_at) {
+    return Date.parse(right.activity_at) - Date.parse(left.activity_at)
+      || right.activity_at.localeCompare(left.activity_at)
+  }
   return (right.latest_sequence ?? 0) - (left.latest_sequence ?? 0)
     || props.conversations.indexOf(right) - props.conversations.indexOf(left)
 }
 
-const pinnedConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'organisation').sort(byLatestMessage))
-const directConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestMessage))
-const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestMessage))
-const removedDirectConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestMessage))
+const pinnedConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'organisation').sort(byLatestActivity))
+const directConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestActivity))
+const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestActivity))
+const removedDirectConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestActivity))
 
 const directContacts = computed(() => {
   const contacts = props.users
     .filter(user => user.id !== props.principal.id)
     .map(user => {
       const topics = directConversations.value.filter(conversation => conversation.member_ids?.includes(user.id))
-      return { user, topics, latestSequence: topics[0]?.latest_sequence ?? -1 }
+      return { user, topics, latestActivity: topics[0]?.activity_at, latestSequence: topics[0]?.latest_sequence ?? -1 }
     })
-  return contacts.sort((left, right) =>
-    right.latestSequence - left.latestSequence
-    || left.user.name.localeCompare(right.user.name),
-  )
+  return contacts.sort((left, right) => {
+    if (left.latestActivity && right.latestActivity && left.latestActivity !== right.latestActivity) return Date.parse(right.latestActivity) - Date.parse(left.latestActivity) || right.latestActivity.localeCompare(left.latestActivity)
+    if (left.latestActivity !== right.latestActivity) return left.latestActivity ? -1 : 1
+    return right.latestSequence - left.latestSequence || left.user.name.localeCompare(right.user.name)
+  })
 })
 
 function directTopicName(conversation: Conversation) {

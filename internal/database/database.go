@@ -34,6 +34,9 @@ var messageAttachmentsMigration string
 //go:embed migrations/006_relax_message_body.sql
 var relaxMessageBodyMigration string
 
+//go:embed migrations/007_conversation_titles.sql
+var conversationTitlesMigration string
+
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -135,6 +138,26 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 6: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(6,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=7`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(conversationTitlesMigration); err != nil {
+			return fmt.Errorf("migration 7: %w", err)
+		}
+		var conversationNameColumnCount int
+		if err = tx.QueryRow(`SELECT count(*) FROM pragma_table_info('conversations') WHERE name='name'`).Scan(&conversationNameColumnCount); err != nil {
+			return fmt.Errorf("migration 7 conversation columns: %w", err)
+		}
+		if conversationNameColumnCount == 1 {
+			if _, err = tx.Exec(`UPDATE conversations SET title=name`); err != nil {
+				return fmt.Errorf("migration 7 conversation titles: %w", err)
+			}
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(7,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}

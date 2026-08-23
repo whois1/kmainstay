@@ -15,6 +15,17 @@ const users: User[] = [
 ]
 
 describe('ConversationView', () => {
+  it('lets the user edit the conversation title inline', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+
+    await wrapper.get('[data-testid=edit-conversation-title]').trigger('click')
+    const input = wrapper.get('[data-testid=conversation-title-input]')
+    await input.setValue('  Better title  ')
+    await wrapper.get('[data-testid=conversation-title-form]').trigger('submit')
+
+    expect(wrapper.emitted('updateTitle')).toEqual([['Better title']])
+  })
+
   it('renders authorised image attachments inline', () => {
     const imageMessage = {
       ...messages[0],

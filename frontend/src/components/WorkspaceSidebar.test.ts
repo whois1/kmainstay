@@ -22,6 +22,29 @@ const users: User[] = [
 ]
 
 describe('WorkspaceSidebar', () => {
+  it('puts a newly created empty topic first by latest activity', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations: [
+          { id: 'older-active', name: 'Older active', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 20, activity_at: '2026-08-24T08:00:00Z' },
+          { id: 'new-empty', name: 'New Hector session', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 0, activity_at: '2026-08-24T09:00:00Z' },
+          { id: 'mary-active', name: 'Mary active', visibility: 'members', member_ids: ['michael', 'mary'], latest_sequence: 30, activity_at: '2026-08-24T08:30:00Z' },
+        ],
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    expect(wrapper.findAll('[data-testid=direct-contact-hector] .direct-topic .conversation-label').map(label => label.text())).toEqual([
+      'New Hector session',
+      'Older active',
+    ])
+    expect(wrapper.findAll('[data-testid=direct-conversations] .direct-contact-heading .conversation-label').map(label => label.text()).slice(0, 2)).toEqual(['Hector', 'Mary'])
+  })
+
   it('groups conversations by purpose and orders each section by latest message', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {

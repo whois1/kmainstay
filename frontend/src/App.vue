@@ -42,8 +42,10 @@ const showConversation = ref(false)
 const conversationDialogMode = ref<'group' | 'topic'>('group')
 const conversationContext = ref('')
 const creatingConversation = ref(false)
+const titleSavingConversationID = ref('')
 let conversationCreationGeneration = 0
 const conversationName = ref('')
+const conversationTitleAutomatic = ref(false)
 const users = ref<User[]>([])
 const eligibleUsers = ref<EligibleUser[]>([])
 const eligibleEmail = ref('')
@@ -60,7 +62,14 @@ const pendingDirectUserIDs = new Set<string>()
 
 const realtime = useRealtime((message) => {
   const conversation = conversations.value.find(({ id }) => id === message.conversation_id)
-  if (conversation) conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
+  if (conversation) {
+    conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
+    conversation.activity_at = message.created_at
+    if (conversation.title_automatic && message.body.trim()) {
+      conversation.name = message.body.trim()
+      conversation.title_automatic = false
+    }
+  }
   if (message.conversation_id === loadingConversationID) {
     if (!pendingRealtimeMessages.some(({ id }) => id === message.id)) pendingRealtimeMessages.push(message)
     return
@@ -228,6 +237,11 @@ async function sendMessage() {
     if (isCurrentConversation()) {
       selected.value!.read_sequence = Math.max(selected.value!.read_sequence ?? 0, message.sequence)
       selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
+      selected.value!.activity_at = message.created_at
+      if (selected.value!.title_automatic && message.body.trim()) {
+        selected.value!.name = message.body.trim()
+        selected.value!.title_automatic = false
+      }
       if (hasNewerMessages.value) await jumpToLatest()
       else if (!messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
     }
@@ -375,6 +389,7 @@ async function openConversationDialog() {
   conversationDialogMode.value = 'group'
   conversationContext.value = ''
   conversationName.value = ''
+  conversationTitleAutomatic.value = false
   memberIDs.value = []
   showConversation.value = true
 }
@@ -384,7 +399,8 @@ function openDirectTopicDialog(user: User) {
   beginConversationDialog()
   conversationDialogMode.value = 'topic'
   conversationContext.value = `New chat with ${user.name}`
-  conversationName.value = ''
+  conversationName.value = `New ${user.name} session`
+  conversationTitleAutomatic.value = true
   memberIDs.value = [user.id]
   showConversation.value = true
 }
@@ -397,7 +413,8 @@ function openTopicDialog(conversation: Conversation) {
   const participantNames = participantIDs.map(userID => users.value.find(user => user.id === userID)?.name).filter(Boolean)
   conversationDialogMode.value = 'topic'
   conversationContext.value = `New chat with ${participantNames.join(', ')}`
-  conversationName.value = ''
+  conversationName.value = `New ${conversation.name} session`
+  conversationTitleAutomatic.value = true
   memberIDs.value = participantIDs
   showConversation.value = true
 }
@@ -442,7 +459,8 @@ async function createConversation() {
   const submittedMemberIDs = [...memberIDs.value]
   creatingConversation.value = true
   try {
-    const conversation = await request<Conversation>(`/api/organisations/${organisationID}/conversations`, jsonInit('POST', { name, visibility: 'members', member_ids: submittedMemberIDs }))
+    const automaticTitle = conversationDialogMode.value === 'topic' && conversationTitleAutomatic.value
+    const conversation = await request<Conversation>(`/api/organisations/${organisationID}/conversations`, jsonInit('POST', { name, visibility: 'members', member_ids: submittedMemberIDs, ...(automaticTitle ? { automatic_title: true } : {}) }))
     if (!conversations.value.some(({ id }) => id === conversation.id)) conversations.value.push(conversation)
     if (creationGeneration !== conversationCreationGeneration) return
     showConversation.value = false
@@ -453,6 +471,29 @@ async function createConversation() {
     if (creationGeneration === conversationCreationGeneration) error.value = messageOf(cause)
   } finally {
     if (creationGeneration === conversationCreationGeneration) creatingConversation.value = false
+  }
+}
+
+async function updateConversationTitle(name: string) {
+  const conversation = selected.value
+  if (!conversation || titleSavingConversationID.value === conversation.id) return
+  titleSavingConversationID.value = conversation.id
+  try {
+    const updated = await request<Pick<Conversation, 'name' | 'title_automatic'>>(`/api/conversations/${conversation.id}/title`, jsonInit('PUT', { name }))
+    conversationRefreshGeneration++
+    const current = conversations.value.find(({ id }) => id === conversation.id)
+    if (current) {
+      current.name = updated.name
+      current.title_automatic = false
+    }
+    if (selected.value?.id === conversation.id) {
+      selected.value.name = updated.name
+      selected.value.title_automatic = false
+    }
+  } catch (cause) {
+    if (selected.value?.id === conversation.id) error.value = messageOf(cause)
+  } finally {
+    if (titleSavingConversationID.value === conversation.id) titleSavingConversationID.value = ''
   }
 }
 
@@ -500,6 +541,17 @@ async function refreshConversations() {
     const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
     if (refreshGeneration !== conversationRefreshGeneration) return
     const refreshedSelected = currentConversations.find(conversation => conversation.id === selected.value?.id)
+    for (const refreshedConversation of currentConversations) {
+      const localConversation = conversations.value.find(conversation => conversation.id === refreshedConversation.id)
+      if (!localConversation) continue
+      refreshedConversation.read_sequence = Math.max(refreshedConversation.read_sequence ?? 0, localConversation.read_sequence ?? 0)
+      if ((localConversation.latest_sequence ?? 0) > (refreshedConversation.latest_sequence ?? 0)) {
+        refreshedConversation.latest_sequence = localConversation.latest_sequence
+        refreshedConversation.activity_at = localConversation.activity_at
+        refreshedConversation.name = localConversation.name
+        refreshedConversation.title_automatic = localConversation.title_automatic
+      }
+    }
     if (refreshedSelected && selected.value) {
       refreshedSelected.read_sequence = Math.max(refreshedSelected.read_sequence ?? 0, selected.value.read_sequence ?? 0)
       refreshedSelected.latest_sequence = Math.max(refreshedSelected.latest_sequence ?? 0, selected.value.latest_sequence ?? 0)
@@ -537,7 +589,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationID === selected?.id" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @update-title="updateConversationTitle" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 
@@ -548,6 +600,6 @@ onBeforeUnmount(realtime.disconnect)
   </BaseDialog>
 
   <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="closeConversationDialog">
-    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">{{ conversationDialogMode === 'topic' ? conversationContext : 'New group chat' }}</p><h2 id="conversation-dialog-title">{{ conversationDialogMode === 'topic' ? 'Start a topic chat' : 'Create group chat' }}</h2><label>{{ conversationDialogMode === 'topic' ? 'Topic' : 'Name' }}<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required :placeholder="conversationDialogMode === 'topic' ? 'e.g. K-Mainstay navigation' : 'e.g. Planning'"></label><fieldset v-if="conversationDialogMode === 'group'"><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < (conversationDialogMode === 'group' ? 2 : 1)">{{ creatingConversation ? 'Creating…' : conversationDialogMode === 'topic' ? 'Create chat' : 'Create group chat' }}</button></form>
+    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">{{ conversationDialogMode === 'topic' ? conversationContext : 'New group chat' }}</p><h2 id="conversation-dialog-title">{{ conversationDialogMode === 'topic' ? 'Start a topic chat' : 'Create group chat' }}</h2><label>{{ conversationDialogMode === 'topic' ? 'Topic' : 'Name' }}<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required :placeholder="conversationDialogMode === 'topic' ? 'e.g. K-Mainstay navigation' : 'e.g. Planning'" @input="conversationTitleAutomatic = false"></label><fieldset v-if="conversationDialogMode === 'group'"><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < (conversationDialogMode === 'group' ? 2 : 1)">{{ creatingConversation ? 'Creating…' : conversationDialogMode === 'topic' ? 'Create chat' : 'Create group chat' }}</button></form>
   </BaseDialog>
 </template>

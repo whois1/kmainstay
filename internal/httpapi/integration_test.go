@@ -61,6 +61,63 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	}
 }
 
+func TestConversationTitlesAndLatestActivity(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-titles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	createTopic := func(placeholder string) map[string]any {
+		t.Helper()
+		var conversation map[string]any
+		decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{
+			"name": placeholder, "visibility": "members", "member_ids": []string{bot["id"].(string)}, "automatic_title": true,
+		}), http.StatusCreated, &conversation)
+		return conversation
+	}
+	older := createTopic("New Hector session")
+	newer := createTopic("New Hector session")
+
+	var conversations []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &conversations)
+	if conversations[0]["id"] != newer["id"] || conversations[1]["id"] != older["id"] {
+		t.Fatalf("new empty topic order = %#v", conversations)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('image-only',?,?,?,?)`, older["id"], boot.UserID, "\u00a0", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('image-only-event',?,?,?,?)`, boot.OrganisationID, older["id"], "image-only", now); err != nil {
+		t.Fatal(err)
+	}
+
+	messageEndpoint := server.URL + "/api/conversations/" + older["id"].(string) + "/messages"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, messageEndpoint, server.URL, "", map[string]any{"body": "Fix topic ordering", "client_id": "first"}), http.StatusCreated, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &conversations)
+	if conversations[0]["id"] != older["id"] || conversations[0]["name"] != "Fix topic ordering" {
+		t.Fatalf("first message title and activity = %#v", conversations)
+	}
+
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+older["id"].(string)+"/title", server.URL, "", map[string]any{"name": "Editable title"}), http.StatusOK, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, messageEndpoint, server.URL, "", map[string]any{"body": "Do not replace the edited title", "client_id": "second"}), http.StatusCreated, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &conversations)
+	if conversations[0]["name"] != "Editable title" {
+		t.Fatalf("edited title was overwritten: %#v", conversations[0])
+	}
+}
+
 func TestDirectConversation_IsIdempotentAndValidatesMembers(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "direct-conversation.db"))
 	if err != nil {
