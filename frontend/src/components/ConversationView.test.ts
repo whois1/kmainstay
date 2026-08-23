@@ -41,6 +41,45 @@ describe('ConversationView', () => {
     expect(wrapper.emitted('update:image')?.at(-1)).toEqual([null])
   })
 
+  it('selects an image pasted into the composer', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const file = new File([new Uint8Array([1, 2, 3])], 'pasted.png', { type: 'image/png' })
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', { value: { files: [file] } })
+
+    wrapper.get('textarea').element.dispatchEvent(paste)
+    await wrapper.vm.$nextTick()
+
+    expect(paste.defaultPrevented).toBe(true)
+    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
+    expect(wrapper.get('[data-testid=selected-image]').text()).toContain('pasted.png')
+  })
+
+  it('selects an image dropped onto the composer', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const file = new File([new Uint8Array([1, 2, 3])], 'dropped.jpg', { type: 'image/jpeg' })
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [file] } })
+
+    wrapper.get('[data-testid=composer]').element.dispatchEvent(drop)
+    await wrapper.vm.$nextTick()
+
+    expect(drop.defaultPrevented).toBe(true)
+    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
+    expect(wrapper.get('[data-testid=selected-image]').text()).toContain('dropped.jpg')
+  })
+
+  it('leaves non-file drops to the browser', () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [] } })
+
+    wrapper.get('[data-testid=composer]').element.dispatchEvent(drop)
+
+    expect(drop.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('update:image')).toBeUndefined()
+  })
+
   it('clears an invalid image error when changing conversations', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
     const invalid = new File([new Uint8Array([1])], 'document.svg', { type: 'image/svg+xml' })

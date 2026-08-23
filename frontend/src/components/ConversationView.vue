@@ -46,6 +46,10 @@ function selectImage(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0] ?? null
   input.value = ''
+  selectImageFile(file)
+}
+
+function selectImageFile(file: File | null) {
   imageError.value = ''
   if (!file) return
   if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024) {
@@ -55,6 +59,26 @@ function selectImage(event: Event) {
   selectedImage.value = file
   updatePreview()
   emit('update:image', file)
+}
+
+function pasteImage(event: ClipboardEvent) {
+  const file = event.clipboardData?.files[0]
+  if (!file) return
+  event.preventDefault()
+  if (props.busy || removedDirectConversation.value) return
+  selectImageFile(file)
+}
+
+function dropImage(event: DragEvent) {
+  const file = event.dataTransfer?.files[0]
+  if (!file) return
+  event.preventDefault()
+  if (props.busy || removedDirectConversation.value) return
+  selectImageFile(file)
+}
+
+function allowImageDrop(event: DragEvent) {
+  if (event.dataTransfer?.types.includes('Files')) event.preventDefault()
 }
 
 function removeImage() {
@@ -233,15 +257,15 @@ function handleScroll() {
       </template>
     </div>
     <button v-if="showJumpToBottom" data-testid="jump-to-bottom" class="jump-to-bottom" type="button" aria-label="Jump to latest message" @click="jumpToBottom">↓</button>
-    <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')">
-      <div class="composer-input"><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation" :placeholder="removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" />
+    <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')" @dragover="allowImageDrop" @drop="dropImage">
+      <div class="composer-input"><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation" :placeholder="removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" @paste="pasteImage" />
         <ul v-if="pickerVisible" id="mention-suggestions" class="mention-picker" role="listbox" aria-label="Mention a person or bot">
           <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
         </ul>
       </div>
       <div v-if="selectedImage" data-testid="selected-image" class="selected-image"><img v-if="previewURL" :src="previewURL" alt="Selected image preview" /><span>{{ selectedImage.name }}</span><button data-testid="remove-image" type="button" aria-label="Remove selected image" @click="removeImage">Remove</button></div>
       <div class="composer-actions"><label class="image-picker" :class="{ disabled: removedDirectConversation || busy }">Add image<input type="file" accept="image/jpeg,image/png" :disabled="removedDirectConversation || busy" @change="selectImage" /></label><button :disabled="removedDirectConversation || busy || (!draft.trim() && !selectedImage)" aria-label="Send message">Send</button></div>
-      <small>{{ removedDirectConversation ? 'This conversation is unavailable' : 'Markdown and JPEG/PNG images supported · Enter to send' }}</small>
+      <small>{{ removedDirectConversation ? 'This conversation is unavailable' : 'Paste, drop or add a JPEG/PNG image · Enter to send' }}</small>
       <small v-if="imageError" class="image-error" role="alert">{{ imageError }}</small>
       <small v-if="(users ?? []).some(user => user.kind === 'bot')" data-testid="bot-guidance">{{ directBot ? `${directBot.name} responds automatically in this private chat.` : 'Bots respond when you @mention them.' }}</small>
     </form>
