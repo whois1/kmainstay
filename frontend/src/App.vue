@@ -39,13 +39,10 @@ const botMutationID = ref('')
 const notice = ref('')
 const removingBotID = ref('')
 const showConversation = ref(false)
-const conversationDialogMode = ref<'group' | 'topic'>('group')
-const conversationContext = ref('')
 const creatingConversation = ref(false)
 const titleSavingConversationIDs = ref(new Set<string>())
 let conversationCreationGeneration = 0
 const conversationName = ref('')
-const conversationTitleAutomatic = ref(false)
 const users = ref<User[]>([])
 const eligibleUsers = ref<EligibleUser[]>([])
 const eligibleEmail = ref('')
@@ -216,12 +213,30 @@ async function sendMessage() {
   if ((!composer.value.trim() && !image.value) || !selected.value || busy.value) return
   const body = composer.value
   const selectedImage = image.value
-  const conversationID = selected.value.id
+  let conversationID = selected.value.id
   const selectionGeneration = conversationSelectionGeneration
+  const draftConversation = conversationID.startsWith('draft:') ? selected.value : null
   const isCurrentConversation = () => selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversationID && conversations.value.some(({ id }) => id === conversationID)
+  const isCurrentSendTarget = () => isCurrentConversation() || Boolean(draftConversation && selectionGeneration === conversationSelectionGeneration && selected.value?.id === draftConversation.id)
   const clientID = pendingMessageClientID.value || crypto.randomUUID()
   composer.value = ''; image.value = null; busy.value = true; error.value = ''
   try {
+    if (draftConversation) {
+      const conversation = await request<Conversation>(`/api/organisations/${organisation.value!.id}/conversations`, jsonInit('POST', {
+        name: draftConversation.name,
+        visibility: 'members',
+        member_ids: draftConversation.member_ids?.filter(userID => userID !== me.value?.id) ?? [],
+        automatic_title: true,
+        client_id: draftConversation.id.slice('draft:'.length),
+      }))
+      conversationRefreshGeneration++
+      const existingConversation = conversations.value.find(({ id }) => id === conversation.id)
+      if (existingConversation) Object.assign(existingConversation, conversation)
+      else conversations.value.push(conversation)
+      const persistedConversation = existingConversation ?? conversation
+      if (selectionGeneration === conversationSelectionGeneration && selected.value?.id === draftConversation.id) selected.value = persistedConversation
+      conversationID = persistedConversation.id
+    }
     let init: RequestInit
     if (selectedImage) {
       const form = new FormData()
@@ -246,7 +261,7 @@ async function sendMessage() {
       else if (!messages.value.some(({ id }) => id === message.id)) messages.value.push(message)
     }
   } catch (cause) {
-    if (isCurrentConversation()) {
+    if (isCurrentSendTarget()) {
       pendingMessageClientID.value = clientID
       composer.value = body
       image.value = selectedImage
@@ -386,37 +401,43 @@ async function openConversationDialog() {
   if (dialogIntentGeneration !== navigationIntentGeneration) return
   users.value = conversationUsers
   beginConversationDialog()
-  conversationDialogMode.value = 'group'
-  conversationContext.value = ''
   conversationName.value = ''
-  conversationTitleAutomatic.value = false
   memberIDs.value = []
   showConversation.value = true
 }
 
 function openDirectTopicDialog(user: User) {
   navigationIntentGeneration++
-  beginConversationDialog()
-  conversationDialogMode.value = 'topic'
-  conversationContext.value = `New chat with ${user.name}`
-  conversationName.value = `New ${user.name} session`
-  conversationTitleAutomatic.value = true
-  memberIDs.value = [user.id]
-  showConversation.value = true
+  startTopicDraft(`New ${user.name} session`, [user.id])
 }
 
 function openTopicDialog(conversation: Conversation) {
   if (!me.value || conversation.visibility !== 'members') return
   navigationIntentGeneration++
-  beginConversationDialog()
   const participantIDs = (conversation.member_ids ?? []).filter(userID => userID !== me.value!.id)
-  const participantNames = participantIDs.map(userID => users.value.find(user => user.id === userID)?.name).filter(Boolean)
-  conversationDialogMode.value = 'topic'
-  conversationContext.value = `New chat with ${participantNames.join(', ')}`
-  conversationName.value = `New ${conversation.name} session`
-  conversationTitleAutomatic.value = true
-  memberIDs.value = participantIDs
-  showConversation.value = true
+  startTopicDraft(`New ${conversation.name} session`, participantIDs)
+}
+
+function startTopicDraft(name: string, participantIDs: string[]) {
+  if (!me.value) return
+  conversationSelectionGeneration++
+  messageLoadGeneration++
+  loadingConversationID = null
+  pendingRealtimeMessages = []
+  selected.value = {
+    id: `draft:${crypto.randomUUID()}`,
+    name,
+    visibility: 'members',
+    member_ids: [me.value.id, ...participantIDs],
+    title_automatic: true,
+  }
+  messages.value = []
+  hasNewerMessages.value = false
+  composer.value = ''
+  image.value = null
+  pendingMessageClientID.value = ''
+  error.value = ''
+  activeView.value = 'chat'
 }
 
 async function selectDirectUser(user: User) {
@@ -451,16 +472,14 @@ async function selectDirectUser(user: User) {
 }
 
 async function createConversation() {
-  const minimumParticipants = conversationDialogMode.value === 'group' ? 2 : 1
   const name = conversationName.value.trim()
-  if (!organisation.value || !name || memberIDs.value.length < minimumParticipants || creatingConversation.value) return
+  if (!organisation.value || !name || memberIDs.value.length < 2 || creatingConversation.value) return
   const creationGeneration = conversationCreationGeneration
   const organisationID = organisation.value.id
   const submittedMemberIDs = [...memberIDs.value]
   creatingConversation.value = true
   try {
-    const automaticTitle = conversationDialogMode.value === 'topic' && conversationTitleAutomatic.value
-    const conversation = await request<Conversation>(`/api/organisations/${organisationID}/conversations`, jsonInit('POST', { name, visibility: 'members', member_ids: submittedMemberIDs, ...(automaticTitle ? { automatic_title: true } : {}) }))
+    const conversation = await request<Conversation>(`/api/organisations/${organisationID}/conversations`, jsonInit('POST', { name, visibility: 'members', member_ids: submittedMemberIDs }))
     if (!conversations.value.some(({ id }) => id === conversation.id)) conversations.value.push(conversation)
     if (creationGeneration !== conversationCreationGeneration) return
     showConversation.value = false
@@ -554,6 +573,10 @@ async function refreshConversations() {
         refreshedConversation.title_automatic = localConversation.title_automatic
       }
     }
+    if (selected.value?.id.startsWith('draft:')) {
+      conversations.value = currentConversations
+      return
+    }
     if (refreshedSelected && selected.value) {
       refreshedSelected.read_sequence = Math.max(refreshedSelected.read_sequence ?? 0, selected.value.read_sequence ?? 0)
       refreshedSelected.latest_sequence = Math.max(refreshedSelected.latest_sequence ?? 0, selected.value.latest_sequence ?? 0)
@@ -602,6 +625,6 @@ onBeforeUnmount(realtime.disconnect)
   </BaseDialog>
 
   <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="closeConversationDialog">
-    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">{{ conversationDialogMode === 'topic' ? conversationContext : 'New group chat' }}</p><h2 id="conversation-dialog-title">{{ conversationDialogMode === 'topic' ? 'Start a topic chat' : 'Create group chat' }}</h2><label>{{ conversationDialogMode === 'topic' ? 'Topic' : 'Name' }}<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required :placeholder="conversationDialogMode === 'topic' ? 'e.g. K-Mainstay navigation' : 'e.g. Planning'" @input="conversationTitleAutomatic = false"></label><fieldset v-if="conversationDialogMode === 'group'"><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < (conversationDialogMode === 'group' ? 2 : 1)">{{ creatingConversation ? 'Creating…' : conversationDialogMode === 'topic' ? 'Create chat' : 'Create group chat' }}</button></form>
+    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">New group chat</p><h2 id="conversation-dialog-title">Create group chat</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required placeholder="e.g. Planning"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < 2">{{ creatingConversation ? 'Creating…' : 'Create group chat' }}</button></form>
   </BaseDialog>
 </template>

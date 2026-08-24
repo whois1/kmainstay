@@ -118,6 +118,41 @@ func TestConversationTitlesAndLatestActivity(t *testing.T) {
 	}
 }
 
+func TestConversationCreation_IsIdempotentForClientID(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-creation-idempotency.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	payload := map[string]any{
+		"name": "New Hector session", "visibility": "members", "member_ids": []string{bot["id"].(string)}, "automatic_title": true, "client_id": "stable-creation-id",
+	}
+	var first, retry map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", payload), http.StatusCreated, &first)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", payload), http.StatusOK, &retry)
+	if first["id"] != retry["id"] {
+		t.Fatalf("retry conversation ID = %v, want %v", retry["id"], first["id"])
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM conversations WHERE organisation_id=? AND title='New Hector session' AND title_automatic=1`, boot.OrganisationID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("automatic conversation count = %d, want 1", count)
+	}
+}
+
 func TestDirectConversation_IsIdempotentAndValidatesMembers(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "direct-conversation.db"))
 	if err != nil {

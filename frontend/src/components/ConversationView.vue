@@ -20,6 +20,7 @@ const imageError = ref('')
 const previewURL = ref('')
 const editingTitle = ref(false)
 const titleDraft = ref('')
+const isDraft = computed(() => props.selected?.id.startsWith('draft:') ?? false)
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
 const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
@@ -56,7 +57,14 @@ watch(() => props.image, value => {
   selectedImage.value = value ?? null
 })
 watch(selectedImage, updatePreview, { immediate: true })
-watch(() => props.selected?.id, () => { closeMentionPicker(); imageError.value = ''; editingTitle.value = false; removeImage() })
+watch(() => props.selected?.id, async () => {
+  closeMentionPicker()
+  imageError.value = ''
+  editingTitle.value = false
+  removeImage()
+  await nextTick()
+  if (isDraft.value) textarea.value?.focus()
+})
 
 function beginTitleEdit() {
   titleDraft.value = conversationDisplayName.value
@@ -271,10 +279,10 @@ function handleScroll() {
     <header v-if="selected">
       <div class="conversation-header-copy">
         <form v-if="editingTitle" data-testid="conversation-title-form" class="conversation-title-form" @submit.prevent="submitTitle"><input data-testid="conversation-title-input" v-model="titleDraft" aria-label="Conversation title" required><button type="submit">Save</button><button type="button" class="secondary" @click="editingTitle = false">Cancel</button></form>
-        <div v-else class="conversation-title-row"><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><button v-if="!removedDirectConversation" data-testid="edit-conversation-title" class="title-edit" type="button" aria-label="Edit conversation title" :disabled="titleBusy" @click="beginTitleEdit">{{ titleBusy ? 'Saving…' : 'Edit' }}</button></div>
+        <div v-else class="conversation-title-row"><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><button v-if="!removedDirectConversation && !isDraft" data-testid="edit-conversation-title" class="title-edit" type="button" aria-label="Edit conversation title" :disabled="titleBusy" @click="beginTitleEdit">{{ titleBusy ? 'Saving…' : 'Edit' }}</button></div>
         <p>{{ conversationContext }}</p>
       </div>
-      <div class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button></div>
+      <div v-if="!isDraft" class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button></div>
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
     <div ref="messageList" class="message-list" aria-live="polite" @scroll="handleScroll">

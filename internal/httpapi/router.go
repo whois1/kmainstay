@@ -278,6 +278,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		Visibility     string   `json:"visibility"`
 		MemberIDs      []string `json:"member_ids"`
 		AutomaticTitle bool     `json:"automatic_title"`
+		ClientID       string   `json:"client_id"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -287,17 +288,36 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid conversation")
 		return
 	}
+	in.ClientID = strings.TrimSpace(in.ClientID)
+	if len(in.ClientID) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid client ID")
+		return
+	}
+	id, now := database.NewID("con"), nowText()
+	internalName := in.Name
+	if in.AutomaticTitle {
+		internalName = "topic:" + id
+		if in.ClientID != "" {
+			internalName = "topic:" + p.ID + ":" + in.ClientID
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			existing, existingErr := s.conversationByInternalName(r.Context(), orgID, internalName)
+			if existingErr == nil {
+				writeJSON(w, http.StatusOK, existing)
+				return
+			}
+			if !errors.Is(existingErr, sql.ErrNoRows) {
+				returnServerError(w)
+				return
+			}
+		}
+	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		returnServerError(w)
 		return
 	}
 	defer tx.Rollback()
-	id, now := database.NewID("con"), nowText()
-	internalName := in.Name
-	if in.AutomaticTitle {
-		internalName = "topic:" + id
-	}
 	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,title,title_automatic,visibility,created_at) VALUES(?,?,?,?,?,?,?)`, id, orgID, internalName, in.Name, in.AutomaticTitle, in.Visibility, now); err != nil {
 		writeError(w, http.StatusConflict, "conversation already exists")
 		return
@@ -332,6 +352,22 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
+}
+
+func (s *server) conversationByInternalName(ctx context.Context, organisationID, internalName string) (map[string]any, error) {
+	var id, name, visibility, activityAt, memberIDsJSON string
+	var titleAutomatic bool
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,coalesce(c.title,c.name),c.visibility,c.created_at,c.title_automatic,
+		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
+		FROM conversations c WHERE c.organisation_id=? AND c.name=?`, organisationID, internalName).Scan(&id, &name, &visibility, &activityAt, &titleAutomatic, &memberIDsJSON)
+	if err != nil {
+		return nil, err
+	}
+	memberIDs := []string{}
+	if err := json.Unmarshal([]byte(memberIDsJSON), &memberIDs); err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
 }
 
 func (s *server) updateConversationTitle(w http.ResponseWriter, r *http.Request) {
