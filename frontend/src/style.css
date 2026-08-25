@@ -102,6 +102,7 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .conversation header p, .settings-header p, .settings-section-heading p, .settings-note, .empty-state p { margin: 0; color: var(--secondary); font-size: 13px; }
 .message-list-shell { min-height: 0; overflow: hidden; position: relative; }
 .message-list { height: 100%; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }
+.message-list.has-jump-control { padding-bottom: 80px; }
 .message-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 12px 0; }
 .new-messages-divider { display: flex; align-items: center; gap: 12px; color: var(--secondary); font-size: 12px; }
 .new-messages-divider::before, .new-messages-divider::after { content: ''; height: 1px; flex: 1; background: var(--border); }
@@ -117,7 +118,7 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .reply-preview div { min-width: 0; display: grid; gap: 2px; }
 .reply-preview button { border: 0; background: transparent; color: var(--secondary); }
 .bot-badge { color: var(--secondary); font-size: 11px; font-weight: 500; }
-.markdown { max-width: 75ch; color: var(--text); font-size: 15px; line-height: 1.5; }
+.markdown { max-width: 75ch; overflow-wrap: anywhere; color: var(--text); font-size: 15px; line-height: 1.5; }
 .markdown p { margin: 4px 0; }
 .markdown a { color: var(--accent); }
 .markdown code, .api-key { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }

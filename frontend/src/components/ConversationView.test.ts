@@ -255,6 +255,7 @@ describe('ConversationView', () => {
 
     expect(wrapper.get('[data-testid=jump-to-bottom]').attributes('aria-label')).toBe('Jump to latest message')
     expect(wrapper.get('[data-testid=jump-to-bottom]').element.parentElement).toBe(messageList.parentElement)
+    expect(wrapper.get('.message-list').classes()).toContain('has-jump-control')
   })
 
   it('preserves a scrolled-up position and shows the jump control for a live message', async () => {

@@ -43,6 +43,9 @@ describe('K-Mainstay UI', () => {
     expect(jumpRule).toContain('bottom: 16px')
     expect(jumpRule).not.toContain('bottom: 112px')
 
+    expect(cssRule('.message-list.has-jump-control')).toContain('padding-bottom: 80px')
+    expect(cssRule('.markdown')).toContain('overflow-wrap: anywhere')
+
     const textareaRule = cssRule('.composer textarea')
     expect(textareaRule).toContain('field-sizing: content')
     expect(textareaRule).toContain('max-height: 160px')

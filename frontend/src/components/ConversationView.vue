@@ -286,7 +286,7 @@ function handleScroll() {
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
     <div class="message-list-shell">
-      <div ref="messageList" class="message-list" aria-live="polite" @scroll="handleScroll">
+      <div ref="messageList" class="message-list" :class="{ 'has-jump-control': showJumpToBottom }" aria-live="polite" @scroll="handleScroll">
         <template v-for="message in messages" :key="message.id">
         <div v-if="message.id === firstUnreadMessageID" data-testid="new-messages-divider" class="new-messages-divider" role="separator" aria-label="New messages"><span>New messages</span></div>
         <article data-testid="message" :data-message-id="message.id">
