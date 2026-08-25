@@ -100,7 +100,8 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .title-edit { min-height: 28px; padding: 4px 8px; border-color: var(--border); background: transparent; color: var(--secondary); }
 .conversation h1 { margin-bottom: 2px; font-size: 20px; }
 .conversation header p, .settings-header p, .settings-section-heading p, .settings-note, .empty-state p { margin: 0; color: var(--secondary); font-size: 13px; }
-.message-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }
+.message-list-shell { min-height: 0; overflow: hidden; position: relative; }
+.message-list { height: 100%; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 20px max(24px, calc((100% - 840px) / 2)); }
 .message-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 12px 0; }
 .new-messages-divider { display: flex; align-items: center; gap: 12px; color: var(--secondary); font-size: 12px; }
 .new-messages-divider::before, .new-messages-divider::after { content: ''; height: 1px; flex: 1; background: var(--border); }
@@ -124,7 +125,7 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .message-image-frame { margin-top: 8px; }
 .message-image { display: block; width: auto; max-width: min(560px, 100%); height: auto; max-height: 520px; border: 1px solid var(--border); border-radius: 8px; object-fit: contain; background: var(--raised); }
 .composer { margin: 0 max(24px, calc((100% - 840px) / 2)) 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; position: relative; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.composer textarea { min-height: 48px; resize: none; border: 0; padding: 8px; background: transparent; }
+.composer textarea { min-height: 48px; max-height: 160px; field-sizing: content; overflow-y: auto; resize: none; border: 0; padding: 8px; background: transparent; }
 .composer button { align-self: start; }
 .composer small { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
 .composer-input { position: relative; min-width: 0; }
@@ -144,7 +145,7 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .mention-picker [role="option"] { display: flex; justify-content: space-between; gap: 16px; padding: 9px 10px; border-radius: 6px; cursor: pointer; }
 .mention-picker [role="option"][aria-selected="true"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .mention { padding: 1px 4px; border-radius: 4px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
-.jump-to-bottom { position: absolute; z-index: 2; right: max(24px, calc((100% - 840px) / 2)); bottom: 112px; width: 44px; height: 44px; padding: 0; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--secondary); box-shadow: 0 2px 8px rgb(0 0 0 / 25%); }
+.jump-to-bottom { position: absolute; z-index: 2; right: max(24px, calc((100% - 840px) / 2)); bottom: 16px; width: 44px; height: 44px; padding: 0; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--secondary); box-shadow: 0 2px 8px rgb(0 0 0 / 25%); }
 .jump-to-bottom:hover { color: var(--text); border-color: var(--secondary); }
 .empty-state { align-self: center; justify-self: center; padding: 32px; text-align: center; }
 
@@ -202,7 +203,8 @@ fieldset { border: 0; padding: 0; margin: 20px 0; }
   .delete-label { display: none; }
   .delete-icon { display: inline; font-size: 13px; line-height: 1; }
   .message-list { padding: 12px 16px; }
-  .composer { margin: 0 16px 16px; }
+  .composer { grid-template-columns: minmax(0, 1fr); margin: 0 16px 16px; }
+  .composer-actions { justify-content: flex-end; }
   .settings-header { display: block; padding: 20px; }
   .back-button { margin-bottom: 16px; }
   .settings-content { width: calc(100% - 32px); }

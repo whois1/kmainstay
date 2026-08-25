@@ -29,6 +29,29 @@ describe('K-Mainstay UI', () => {
     expect(cssRule('.message-list')).toContain('overflow-y: auto')
   })
 
+  it('keeps the jump control inside the message region and suppresses stray scrollbars', () => {
+    const shellRule = cssRule('.message-list-shell')
+    expect(shellRule).toContain('min-height: 0')
+    expect(shellRule).toContain('overflow: hidden')
+    expect(shellRule).toContain('position: relative')
+
+    const listRule = cssRule('.message-list')
+    expect(listRule).toContain('height: 100%')
+    expect(listRule).toContain('overflow-x: hidden')
+
+    const jumpRule = cssRule('.jump-to-bottom')
+    expect(jumpRule).toContain('bottom: 16px')
+    expect(jumpRule).not.toContain('bottom: 112px')
+
+    const textareaRule = cssRule('.composer textarea')
+    expect(textareaRule).toContain('field-sizing: content')
+    expect(textareaRule).toContain('max-height: 160px')
+    expect(textareaRule).toContain('overflow-y: auto')
+
+    expect(styles).toContain('  .composer { grid-template-columns: minmax(0, 1fr); margin: 0 16px 16px; }')
+    expect(styles).toContain('  .composer-actions { justify-content: flex-end; }')
+  })
+
   it('constrains long conversation labels to the sidebar before applying an ellipsis', () => {
     expect(cssRule('.sidebar-navigation section')).toContain('min-width: 0')
     expect(cssRule('.direct-contact')).toContain('min-width: 0')
