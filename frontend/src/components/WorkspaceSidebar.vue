@@ -29,10 +29,12 @@ function byLatestActivity(left: Conversation, right: Conversation) {
     || props.conversations.indexOf(right) - props.conversations.indexOf(left)
 }
 
-const pinnedConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'organisation').sort(byLatestActivity))
-const directConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestActivity))
-const groupConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestActivity))
-const removedDirectConversations = computed(() => props.conversations.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestActivity))
+const activeConversations = computed(() => props.conversations.filter(conversation => !conversation.archived))
+const archivedConversations = computed(() => props.conversations.filter(conversation => conversation.archived).sort(byLatestActivity))
+const pinnedConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'organisation').sort(byLatestActivity))
+const directConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestActivity))
+const groupConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestActivity))
+const removedDirectConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestActivity))
 
 const directContacts = computed(() => {
   const contacts = props.users
@@ -114,6 +116,12 @@ function openLatestDirectTopic(user: User, topics: Conversation[]) {
           </button>
           <button :data-testid="`new-group-topic-${conversation.id}`" class="topic-add" :aria-label="`New chat with the people in ${conversation.name}`" title="New chat with the same people" @click="$emit('newTopic', conversation)">＋</button>
         </div>
+      </section>
+      <section v-if="archivedConversations.length" data-testid="archived-conversations" aria-labelledby="archived-heading">
+        <h2 id="archived-heading" class="sidebar-section-heading"><span aria-hidden="true">▣</span><span>Archived</span></h2>
+        <button v-for="conversation in archivedConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+        </button>
       </section>
     </nav>
     <div class="profile"><span>{{ principal.name.slice(0, 1) }}</span><div><strong>{{ principal.name }}</strong><small>Human</small></div></div>

@@ -61,6 +61,119 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	}
 }
 
+func TestMessages_ExposeReplySummary(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-replies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "reader@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var original map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Original message", "client_id": "original"}), http.StatusCreated, &original)
+	var reply map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Reply body", "client_id": "reply", "reply_to_message_id": original["id"]}), http.StatusCreated, &reply)
+
+	replySummary, ok := reply["reply_to"].(map[string]any)
+	if !ok || replySummary["id"] != original["id"] || replySummary["author_name"] != "Reader" || replySummary["body"] != "Original message" {
+		t.Fatalf("reply summary = %#v", reply["reply_to"])
+	}
+	var listed []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, endpoint, server.URL, "", nil), http.StatusOK, &listed)
+	if len(listed) != 2 || listed[1]["reply_to"].(map[string]any)["id"] != original["id"] {
+		t.Fatalf("listed messages = %#v", listed)
+	}
+}
+
+func TestMessages_IdempotentReplayPrecedesChangedReplyTargetValidation(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-reply-replay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "reader@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	firstEndpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var original map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, firstEndpoint, server.URL, "", map[string]any{"body": "Original message", "client_id": "original"}), http.StatusCreated, &original)
+	var firstReply map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, firstEndpoint, server.URL, "", map[string]any{"body": "Stored reply", "client_id": "stable-reply", "reply_to_message_id": original["id"]}), http.StatusCreated, &firstReply)
+
+	var otherConversation map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Other", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &otherConversation)
+	otherEndpoint := server.URL + "/api/conversations/" + otherConversation["id"].(string) + "/messages"
+	var otherMessage map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, otherEndpoint, server.URL, "", map[string]any{"body": "Other conversation", "client_id": "other"}), http.StatusCreated, &otherMessage)
+
+	var replay map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, firstEndpoint, server.URL, "", map[string]any{"body": "Changed retry", "client_id": "stable-reply", "reply_to_message_id": otherMessage["id"]}), http.StatusOK, &replay)
+	if replay["id"] != firstReply["id"] || replay["body"] != "Stored reply" {
+		t.Fatalf("replay = %#v, want original reply %#v", replay, firstReply)
+	}
+	replySummary, ok := replay["reply_to"].(map[string]any)
+	if !ok || replySummary["id"] != original["id"] || replySummary["body"] != "Original message" {
+		t.Fatalf("replay reply summary = %#v", replay["reply_to"])
+	}
+}
+
+func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "reader@example.com", "Reader", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "reader@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	archiveEndpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/archive"
+	conversationEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
+	var active []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
+	if len(active) != 0 {
+		t.Fatalf("active conversations = %#v", active)
+	}
+	var all []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint+"?include_archived=true", server.URL, "", nil), http.StatusOK, &all)
+	if len(all) != 1 || all[0]["archived"] != true {
+		t.Fatalf("all conversations = %#v", all)
+	}
+
+	decodeResponse(t, requestJSON(t, client, http.MethodDelete, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
+	if len(active) != 1 {
+		t.Fatalf("restored conversations = %#v", active)
+	}
+
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", server.URL, "", map[string]any{"body": "New activity", "client_id": "activity"}), http.StatusCreated, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
+	if len(active) != 1 {
+		t.Fatalf("conversation after activity = %#v", active)
+	}
+}
+
 func TestConversationTitlesAndLatestActivity(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-titles.db"))
 	if err != nil {
@@ -1427,6 +1540,9 @@ func decodeResponse(t *testing.T, response *http.Response, status int, out any) 
 	defer response.Body.Close()
 	if response.StatusCode != status {
 		t.Fatalf("status = %d, want %d: %s", response.StatusCode, status, readBody(response))
+	}
+	if out == nil {
+		return
 	}
 	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
 		t.Fatal(err)

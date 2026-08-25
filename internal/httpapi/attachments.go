@@ -48,21 +48,23 @@ type pendingAttachment struct {
 }
 
 type messageInput struct {
-	Body       string
-	ClientID   string
-	Attachment *pendingAttachment
+	Body             string
+	ClientID         string
+	ReplyToMessageID string
+	Attachment       *pendingAttachment
 }
 
 func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (messageInput, bool) {
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		var input struct {
-			Body     string `json:"body"`
-			ClientID string `json:"client_id"`
+			Body             string `json:"body"`
+			ClientID         string `json:"client_id"`
+			ReplyToMessageID string `json:"reply_to_message_id"`
 		}
 		if !decode(w, r, &input) {
 			return messageInput{}, false
 		}
-		return messageInput{Body: input.Body, ClientID: input.ClientID}, true
+		return messageInput{Body: input.Body, ClientID: input.ClientID, ReplyToMessageID: input.ReplyToMessageID}, true
 	}
 	select {
 	case s.imageUploadSlots <- struct{}{}:
@@ -83,7 +85,7 @@ func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (mes
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
-	input := messageInput{Body: r.FormValue("body"), ClientID: r.FormValue("client_id")}
+	input := messageInput{Body: r.FormValue("body"), ClientID: r.FormValue("client_id"), ReplyToMessageID: r.FormValue("reply_to_message_id")}
 	files := r.MultipartForm.File["image"]
 	if len(files) == 0 {
 		return input, true

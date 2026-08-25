@@ -107,6 +107,14 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .avatar.bot, .member-avatar.bot { border: 1px solid var(--border); background: var(--surface); color: var(--accent); }
 .message-meta { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
 .message-meta time { color: var(--muted); font-size: 13px; }
+.message-reply-action { margin-left: auto; padding: 2px 6px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+.message-reply-action:hover { background: var(--hover); color: var(--text); }
+.message-reply, .reply-preview { border-left: 2px solid var(--accent); background: var(--raised); color: var(--secondary); }
+.message-reply { display: grid; gap: 2px; max-width: 70ch; margin-top: 6px; padding: 6px 10px; font-size: 13px; }
+.message-reply span, .reply-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-preview { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; }
+.reply-preview div { min-width: 0; display: grid; gap: 2px; }
+.reply-preview button { border: 0; background: transparent; color: var(--secondary); }
 .bot-badge { color: var(--secondary); font-size: 11px; font-weight: 500; }
 .markdown { max-width: 75ch; color: var(--text); font-size: 15px; line-height: 1.5; }
 .markdown p { margin: 4px 0; }

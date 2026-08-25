@@ -24,6 +24,7 @@ const email = ref('')
 const password = ref('')
 const composer = ref('')
 const image = ref<File | null>(null)
+const replyingTo = ref<Message | null>(null)
 const pendingMessageClientID = ref('')
 const error = ref('')
 const busy = ref(false)
@@ -56,10 +57,13 @@ let messageLoadGeneration = 0
 let loadingConversationID: string | null = null
 let pendingRealtimeMessages: Message[] = []
 const pendingDirectUserIDs = new Set<string>()
+const archiveStateGenerations = new Map<string, number>()
 
 const realtime = useRealtime((message) => {
   const conversation = conversations.value.find(({ id }) => id === message.conversation_id)
   if (conversation) {
+    archiveStateGenerations.set(conversation.id, (archiveStateGenerations.get(conversation.id) ?? 0) + 1)
+    conversation.archived = false
     conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
     conversation.activity_at = message.created_at
     if (conversation.title_automatic && message.body.trim()) {
@@ -92,8 +96,9 @@ async function initialise() {
   const organisations = await request<Organisation[]>('/api/organisations')
   organisation.value = organisations[0] ?? null
   if (!organisation.value) return
-  conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
-  if (conversations.value[0]) await selectConversation(conversations.value[0])
+  conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations?include_archived=true`)
+  const firstActive = conversations.value.find(conversation => !conversation.archived)
+  if (firstActive) await selectConversation(firstActive)
   try { users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`) } catch { /* Settings can retry a transient roster failure. */ }
   realtime.connect()
 }
@@ -105,8 +110,9 @@ async function login() {
     const organisations = await request<Organisation[]>('/api/organisations')
     organisation.value = organisations[0] ?? null
     if (organisation.value) {
-      conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
-      if (conversations.value[0]) await selectConversation(conversations.value[0])
+      conversations.value = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations?include_archived=true`)
+      const firstActive = conversations.value.find(conversation => !conversation.archived)
+      if (firstActive) await selectConversation(firstActive)
       try { users.value = await request<User[]>(`/api/organisations/${organisation.value.id}/users`) } catch { /* Settings can retry a transient roster failure. */ }
       realtime.connect()
     }
@@ -118,6 +124,7 @@ async function selectConversation(conversation: Conversation) {
   const selectionGeneration = ++conversationSelectionGeneration
   const loadGeneration = ++messageLoadGeneration
   selected.value = conversation
+  replyingTo.value = null
   image.value = null
   pendingMessageClientID.value = ''
   messages.value = []
@@ -209,10 +216,21 @@ function updateImageDraft(value: File | null) {
   image.value = value
 }
 
+function selectReply(message: Message) {
+  if (message.id !== replyingTo.value?.id) pendingMessageClientID.value = ''
+  replyingTo.value = message
+}
+
+function cancelReply() {
+  if (replyingTo.value) pendingMessageClientID.value = ''
+  replyingTo.value = null
+}
+
 async function sendMessage() {
-  if ((!composer.value.trim() && !image.value) || !selected.value || busy.value) return
+  if ((!composer.value.trim() && !image.value) || !selected.value || selected.value.archived || busy.value) return
   const body = composer.value
   const selectedImage = image.value
+  const selectedReply = replyingTo.value
   let conversationID = selected.value.id
   const selectionGeneration = conversationSelectionGeneration
   const draftConversation = conversationID.startsWith('draft:') ? selected.value : null
@@ -242,14 +260,17 @@ async function sendMessage() {
       const form = new FormData()
       form.set('body', body)
       form.set('client_id', clientID)
+      if (selectedReply) form.set('reply_to_message_id', selectedReply.id)
       form.set('image', selectedImage)
       init = { method: 'POST', body: form }
     } else {
-      init = jsonInit('POST', { body, client_id: clientID })
+      init = jsonInit('POST', { body, client_id: clientID, reply_to_message_id: selectedReply?.id })
     }
     const message = await request<Message>(`/api/conversations/${conversationID}/messages`, init)
     if (pendingMessageClientID.value === clientID) pendingMessageClientID.value = ''
+    if (replyingTo.value?.id === selectedReply?.id) replyingTo.value = null
     if (isCurrentConversation()) {
+      selected.value!.archived = false
       selected.value!.read_sequence = Math.max(selected.value!.read_sequence ?? 0, message.sequence)
       selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
       selected.value!.activity_at = message.created_at
@@ -433,6 +454,7 @@ function startTopicDraft(name: string, participantIDs: string[]) {
   }
   messages.value = []
   hasNewerMessages.value = false
+  replyingTo.value = null
   composer.value = ''
   image.value = null
   pendingMessageClientID.value = ''
@@ -518,6 +540,34 @@ async function updateConversationTitle(name: string) {
   }
 }
 
+async function setSelectedConversationArchived(archived: boolean) {
+  const conversation = selected.value
+  if (!conversation || conversation.id.startsWith('draft:') || busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    await request<void>(`/api/conversations/${conversation.id}/archive`, jsonInit(archived ? 'PUT' : 'DELETE'))
+    await reconcileConversationArchiveState(conversation.id)
+  } catch (cause) {
+    if (selected.value?.id === conversation.id) error.value = messageOf(cause)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function reconcileConversationArchiveState(conversationID: string) {
+  if (!organisation.value) return
+  const archiveStateGeneration = archiveStateGenerations.get(conversationID) ?? 0
+  const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations?include_archived=true`)
+  if ((archiveStateGenerations.get(conversationID) ?? 0) !== archiveStateGeneration) return
+  const authoritativeConversation = currentConversations.find(conversation => conversation.id === conversationID)
+  if (!authoritativeConversation) return
+  archiveStateGenerations.set(conversationID, archiveStateGeneration + 1)
+  const listedConversation = conversations.value.find(conversation => conversation.id === conversationID)
+  if (listedConversation) listedConversation.archived = authoritativeConversation.archived
+  if (selected.value?.id === conversationID) selected.value.archived = authoritativeConversation.archived
+}
+
 async function deleteSelectedConversation() {
   if (!organisation.value || organisation.value.role !== 'admin' || !selected.value || busy.value) return
   const conversation = selected.value
@@ -546,7 +596,8 @@ async function handleConversationDeleted(conversationID: string) {
   selected.value = null
   messages.value = []
   try {
-    if (conversations.value[0]) await selectConversation(conversations.value[0])
+    const firstActive = conversations.value.find(conversation => !conversation.archived)
+    if (firstActive) await selectConversation(firstActive)
   } catch (cause) { error.value = messageOf(cause) }
 }
 
@@ -558,13 +609,17 @@ async function reconcileDeletedConversation(conversationID: string) {
 async function refreshConversations() {
   if (!organisation.value) return
   const refreshGeneration = ++conversationRefreshGeneration
+  const archiveStateGenerationsAtStart = new Map(archiveStateGenerations)
   try {
-    const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations`)
+    const currentConversations = await request<Conversation[]>(`/api/organisations/${organisation.value.id}/conversations?include_archived=true`)
     if (refreshGeneration !== conversationRefreshGeneration) return
     const refreshedSelected = currentConversations.find(conversation => conversation.id === selected.value?.id)
     for (const refreshedConversation of currentConversations) {
       const localConversation = conversations.value.find(conversation => conversation.id === refreshedConversation.id)
       if (!localConversation) continue
+      if ((archiveStateGenerations.get(refreshedConversation.id) ?? 0) !== (archiveStateGenerationsAtStart.get(refreshedConversation.id) ?? 0)) {
+        refreshedConversation.archived = localConversation.archived
+      }
       refreshedConversation.read_sequence = Math.max(refreshedConversation.read_sequence ?? 0, localConversation.read_sequence ?? 0)
       if ((localConversation.latest_sequence ?? 0) > (refreshedConversation.latest_sequence ?? 0)) {
         refreshedConversation.latest_sequence = localConversation.latest_sequence
@@ -589,7 +644,8 @@ async function refreshConversations() {
     conversationSelectionGeneration++
     selected.value = null
     messages.value = []
-    if (currentConversations[0]) await selectConversation(currentConversations[0])
+    const firstActive = conversations.value.find(conversation => !conversation.archived)
+    if (firstActive) await selectConversation(firstActive)
   } catch (cause) {
     if (refreshGeneration === conversationRefreshGeneration) error.value = messageOf(cause)
   }
@@ -614,7 +670,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @update-title="updateConversationTitle" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :image="image" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:image="updateImageDraft" @update-title="updateConversationTitle" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

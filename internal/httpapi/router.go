@@ -71,6 +71,8 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("POST /api/organisations/{organisation}/conversations", s.withAuth(http.HandlerFunc(s.createConversation)))
 		mux.Handle("POST /api/organisations/{organisation}/direct-conversations/{user}", s.withAuth(http.HandlerFunc(s.directConversation)))
 		mux.Handle("PUT /api/conversations/{conversation}/title", s.withAuth(http.HandlerFunc(s.updateConversationTitle)))
+		mux.Handle("PUT /api/conversations/{conversation}/archive", s.withAuth(http.HandlerFunc(s.archiveConversation)))
+		mux.Handle("DELETE /api/conversations/{conversation}/archive", s.withAuth(http.HandlerFunc(s.restoreConversation)))
 		mux.Handle("DELETE /api/organisations/{organisation}/conversations/{conversation}", s.withAuth(http.HandlerFunc(s.deleteConversation)))
 		mux.Handle("GET /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.users)))
 		mux.Handle("POST /api/organisations/{organisation}/users", s.withAuth(http.HandlerFunc(s.addOrganisationUser)))
@@ -214,18 +216,20 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
+	includeArchived := r.URL.Query().Get("include_archived") == "true"
 	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,coalesce(c.title,c.name),c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
 		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at),c.title_automatic,
-		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]')
+		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]'),archive.user_id IS NOT NULL
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
 		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=om.user_id
-		WHERE c.organisation_id=? AND om.user_id=? AND (c.visibility='organisation' OR (
+		LEFT JOIN conversation_archives archive ON archive.conversation_id=c.id AND archive.user_id=om.user_id
+		WHERE c.organisation_id=? AND om.user_id=? AND (? OR archive.user_id IS NULL) AND (c.visibility='organisation' OR (
 			(SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=c.id)>=2
 			AND EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)))
 		ORDER BY julianday(coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at)) DESC,
 		coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0) DESC,
-		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at) DESC,c.id DESC`, r.PathValue("organisation"), current(r).ID, current(r).ID)
+		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at) DESC,c.id DESC`, r.PathValue("organisation"), current(r).ID, includeArchived, current(r).ID)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
@@ -235,11 +239,11 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, name, visibility, activityAt, memberIDsJSON string
 		var readSequence, latestSequence int64
-		var titleAutomatic bool
-		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON) == nil {
+		var titleAutomatic, archived bool
+		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON, &archived) == nil {
 			var memberIDs []string
 			_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic})
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic, "archived": archived})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -485,6 +489,34 @@ func (s *server) exactDirectConversation(ctx context.Context, organisationID, cu
 	var memberIDs []string
 	_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
 	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
+}
+
+func (s *server) archiveConversation(w http.ResponseWriter, r *http.Request) {
+	principal := current(r)
+	conversationID := r.PathValue("conversation")
+	if principal.Kind != "human" || !s.canAccess(r.Context(), conversationID, principal.ID) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO conversation_archives(user_id,conversation_id,archived_at) VALUES(?,?,?)`, principal.ID, conversationID, nowText()); err != nil {
+		returnServerError(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) restoreConversation(w http.ResponseWriter, r *http.Request) {
+	principal := current(r)
+	conversationID := r.PathValue("conversation")
+	if principal.Kind != "human" || !s.canAccess(r.Context(), conversationID, principal.ID) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM conversation_archives WHERE user_id=? AND conversation_id=?`, principal.ID, conversationID); err != nil {
+		returnServerError(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
@@ -852,6 +884,12 @@ func (s *server) replaceBotKey(w http.ResponseWriter, r *http.Request, revokeOnl
 	writeJSON(w, 201, map[string]string{"api_key": key})
 }
 
+type messageReply struct {
+	ID         string `json:"id"`
+	AuthorName string `json:"author_name"`
+	Body       string `json:"body"`
+}
+
 type message struct {
 	ID             string          `json:"id"`
 	ConversationID string          `json:"conversation_id"`
@@ -864,6 +902,7 @@ type message struct {
 	Sequence       int64           `json:"sequence"`
 	Mentions       []mentionedUser `json:"mentions"`
 	Attachments    []attachment    `json:"attachments"`
+	ReplyTo        *messageReply   `json:"reply_to,omitempty"`
 }
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
@@ -941,6 +980,11 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 			returnServerError(w)
 			return
 		}
+		items[index].ReplyTo, err = queryMessageReply(r.Context(), s.db, items[index].ID)
+		if err != nil {
+			returnServerError(w)
+			return
+		}
 	}
 	writeJSON(w, 200, items)
 }
@@ -974,13 +1018,21 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m, created, err := s.insertMessageWithAttachment(r.Context(), conversationID, p, in.Body, in.ClientID, in.Attachment)
+	m, created, err := s.insertMessageWithAttachment(r.Context(), conversationID, p, in.Body, in.ClientID, in.ReplyToMessageID, in.Attachment)
 	if err != nil {
 		if in.Attachment != nil {
 			_ = s.attachments.Delete(in.Attachment.StorageKey)
 		}
 		if errors.Is(err, errMessageAccessDenied) {
 			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+		if errors.Is(err, errMessageInvalidReply) {
+			writeError(w, http.StatusBadRequest, "reply target is not in conversation")
+			return
+		}
+		if errors.Is(err, errMessageInvalidInput) {
+			writeError(w, http.StatusBadRequest, "invalid message")
 			return
 		}
 		returnServerError(w)
@@ -1047,26 +1099,60 @@ func (s *server) putConversationRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int64{"sequence": persisted})
 }
 
-var errMessageAccessDenied = errors.New("message access denied")
+var (
+	errMessageAccessDenied = errors.New("message access denied")
+	errMessageInvalidReply = errors.New("invalid reply target")
+	errMessageInvalidInput = errors.New("invalid message")
+)
 
 func (s *server) insertMessage(ctx context.Context, conversationID string, p principal, body, clientID string) (message, bool, error) {
-	return s.insertMessageWithAttachment(ctx, conversationID, p, body, clientID, nil)
+	return s.insertMessageWithAttachment(ctx, conversationID, p, body, clientID, "", nil)
 }
 
-func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID string, p principal, body, clientID string, pending *pendingAttachment) (message, bool, error) {
+func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID string, p principal, body, clientID, replyToMessageID string, pending *pendingAttachment) (message, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return message{}, false, err
 	}
 	defer tx.Rollback()
+	if clientID != "" {
+		existing, existingErr := messageByClientInTransaction(ctx, tx, conversationID, p, clientID)
+		if existingErr == nil {
+			return existing, false, nil
+		}
+		if !errors.Is(existingErr, sql.ErrNoRows) {
+			return message{}, false, existingErr
+		}
+		duplicateExists, duplicateErr := duplicateMessageExists(ctx, tx, conversationID, p.ID, clientID)
+		if duplicateErr != nil {
+			return message{}, false, duplicateErr
+		}
+		if duplicateExists {
+			return message{}, false, errMessageAccessDenied
+		}
+	}
+	if len(replyToMessageID) > 200 {
+		return message{}, false, errMessageInvalidInput
+	}
 	m := message{ID: database.NewID("msg"), ConversationID: conversationID, AuthorID: p.ID, AuthorName: p.Name, AuthorKind: p.Kind, Body: body, ClientID: clientID, CreatedAt: nowText(), Mentions: []mentionedUser{}, Attachments: []attachment{}}
-	result, insertErr := tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at)
-		SELECT ?,c.id,?,?,nullif(?,''),?
+	if replyToMessageID != "" {
+		m.ReplyTo = &messageReply{}
+		if err := tx.QueryRowContext(ctx, `SELECT original.id,author.name,original.body
+			FROM messages original JOIN users author ON author.id=original.author_id
+			WHERE original.id=? AND original.conversation_id=?`, replyToMessageID, conversationID).Scan(&m.ReplyTo.ID, &m.ReplyTo.AuthorName, &m.ReplyTo.Body); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return message{}, false, errMessageInvalidReply
+			}
+			return message{}, false, err
+		}
+	}
+	result, insertErr := tx.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,author_id,body,client_id,reply_to_message_id,created_at)
+		SELECT ?,c.id,?,?,nullif(?,''),nullif(?,''),?
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
 		WHERE c.id=? AND (c.visibility='organisation' OR (
 			EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)
-			AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, m.ID, p.ID, body, clientID, m.CreatedAt, p.ID, conversationID, p.ID)
+			AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, m.ID, p.ID, body, clientID, replyToMessageID, m.CreatedAt, p.ID, conversationID, p.ID)
 	if insertErr == nil {
 		if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
 			return message{}, false, rowsErr
@@ -1075,40 +1161,25 @@ func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID
 		}
 	} else {
 		if clientID != "" {
-			var existing message
-			e := tx.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence
-				FROM messages m
-				JOIN users u ON u.id=m.author_id
-				JOIN realtime_events e ON e.message_id=m.id
-				JOIN conversations c ON c.id=m.conversation_id
-				JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
-				WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?
-				AND (c.visibility='organisation' OR (
-					EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)
-					AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&existing.ID, &existing.ConversationID, &existing.AuthorID, &existing.AuthorName, &existing.AuthorKind, &existing.Body, &existing.ClientID, &existing.CreatedAt, &existing.Sequence)
+			existing, e := messageByClientInTransaction(ctx, tx, conversationID, p, clientID)
 			if e == nil {
-				existing.Mentions, e = messageMentionsInTransaction(ctx, tx, existing.ID)
-				if e != nil {
-					return message{}, false, e
-				}
-				existing.Attachments, e = queryMessageAttachments(ctx, tx, existing.ID)
-				if e != nil {
-					return message{}, false, e
-				}
 				return existing, false, nil
 			}
 			if !errors.Is(e, sql.ErrNoRows) {
 				return message{}, false, e
 			}
-			var duplicateExists int
-			if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE conversation_id=? AND author_id=? AND client_id=?`, conversationID, p.ID, clientID).Scan(&duplicateExists); e != nil {
-				return message{}, false, e
+			duplicateExists, duplicateErr := duplicateMessageExists(ctx, tx, conversationID, p.ID, clientID)
+			if duplicateErr != nil {
+				return message{}, false, duplicateErr
 			}
-			if duplicateExists == 1 {
+			if duplicateExists {
 				return message{}, false, errMessageAccessDenied
 			}
 		}
 		return message{}, false, insertErr
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM conversation_archives WHERE conversation_id=?`, conversationID); err != nil {
+		return message{}, false, err
 	}
 	if title := strings.TrimSpace(body); title != "" {
 		priorBodies, queryErr := tx.QueryContext(ctx, `SELECT body FROM messages WHERE conversation_id=? AND id<>?`, conversationID, m.ID)
@@ -1214,20 +1285,60 @@ func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID
 	return m, true, nil
 }
 
-func (s *server) messageByClient(ctx context.Context, conversationID, authorID, clientID string) (message, error) {
+func messageByClientInTransaction(ctx context.Context, tx *sql.Tx, conversationID string, p principal, clientID string) (message, error) {
 	var m message
-	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence FROM messages m JOIN users u ON u.id=m.author_id JOIN realtime_events e ON e.message_id=m.id WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?`, conversationID, authorID, clientID).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
+	err := tx.QueryRowContext(ctx, `SELECT m.id,m.conversation_id,m.author_id,u.name,u.kind,m.body,coalesce(m.client_id,''),m.created_at,e.sequence
+		FROM messages m
+		JOIN users u ON u.id=m.author_id
+		JOIN realtime_events e ON e.message_id=m.id
+		JOIN conversations c ON c.id=m.conversation_id
+		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id AND om.user_id=?
+		WHERE m.conversation_id=? AND m.author_id=? AND m.client_id=?
+		AND (c.visibility='organisation' OR (
+			EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=c.id AND cm.user_id=?)
+			AND (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id=c.id)>=2))`, p.ID, conversationID, p.ID, clientID, p.ID).Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.AuthorName, &m.AuthorKind, &m.Body, &m.ClientID, &m.CreatedAt, &m.Sequence)
 	if err == nil {
-		m.Mentions, err = s.messageMentions(ctx, m.ID)
+		m.Mentions, err = messageMentionsInTransaction(ctx, tx, m.ID)
 	}
 	if err == nil {
-		m.Attachments, err = s.messageAttachments(ctx, m.ID)
+		m.Attachments, err = queryMessageAttachments(ctx, tx, m.ID)
+	}
+	if err == nil {
+		m.ReplyTo, err = queryMessageReply(ctx, tx, m.ID)
 	}
 	return m, err
 }
 
+func duplicateMessageExists(ctx context.Context, tx *sql.Tx, conversationID, authorID, clientID string) (bool, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE conversation_id=? AND author_id=? AND client_id=?`, conversationID, authorID, clientID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 1, nil
+}
+
 func (s *server) messageMentions(ctx context.Context, messageID string) ([]mentionedUser, error) {
 	return queryMessageMentions(ctx, s.db, messageID)
+}
+
+type replyQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func queryMessageReply(ctx context.Context, queryable replyQueryer, messageID string) (*messageReply, error) {
+	var reply messageReply
+	err := queryable.QueryRowContext(ctx, `SELECT original.id,author.name,original.body
+		FROM messages reply
+		JOIN messages original ON original.id=reply.reply_to_message_id
+		JOIN users author ON author.id=original.author_id
+		WHERE reply.id=?`, messageID).Scan(&reply.ID, &reply.AuthorName, &reply.Body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &reply, nil
 }
 
 type queryer interface {
@@ -1363,6 +1474,9 @@ func (s *server) eventFor(ctx context.Context, seq int64, target principal) (mes
 	}
 	if err == nil {
 		m.Attachments, err = s.messageAttachments(ctx, m.ID)
+	}
+	if err == nil {
+		m.ReplyTo, err = queryMessageReply(ctx, s.db, m.ID)
 	}
 	return m, err
 }

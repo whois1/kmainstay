@@ -23,14 +23,14 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "messages", "message_mentions", "message_bot_deliveries", "attachments", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
+	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "conversation_archives", "messages", "message_mentions", "message_bot_deliveries", "attachments", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
 		var got string
 		if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&got); err != nil {
 			t.Errorf("missing table %s: %v", table, err)
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 }
@@ -262,7 +262,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string

@@ -22,6 +22,26 @@ const users: User[] = [
 ]
 
 describe('WorkspaceSidebar', () => {
+  it('keeps archived conversations out of active groups and exposes them separately', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations: [
+          { id: 'active', name: 'Active', visibility: 'organisation' },
+          { id: 'archived', name: 'Done', visibility: 'organisation', archived: true },
+        ],
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    expect(wrapper.get('[data-testid=pinned-conversations]').text()).toContain('Active')
+    expect(wrapper.get('[data-testid=pinned-conversations]').text()).not.toContain('Done')
+    expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('Done')
+  })
+
   it('puts a newly created empty topic first by latest activity', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
