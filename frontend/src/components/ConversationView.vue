@@ -3,8 +3,8 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../markdown'
 import type { Conversation, Message, User } from '../types'
 
-const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; image?: File | null; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number; replyingTo?: Message | null }>()
-const emit = defineEmits<{ deleteConversation: []; archiveConversation: []; restoreConversation: []; newTopic: []; updateTitle: [name: string]; replyTo: [message: Message]; cancelReply: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:image': [value: File | null] }>()
+const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; images?: File[]; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number; replyingTo?: Message | null }>()
+const emit = defineEmits<{ deleteConversation: []; archiveConversation: []; restoreConversation: []; newTopic: []; updateTitle: [name: string]; replyTo: [message: Message]; cancelReply: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:images': [value: File[]] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
@@ -15,9 +15,9 @@ const mentionStart = ref<number | null>(null)
 const mentionQuery = ref('')
 const activeSuggestion = ref(0)
 const pickerOpen = ref(false)
-const selectedImage = ref<File | null>(props.image ?? null)
+const selectedImages = ref<File[]>(props.images ?? [])
 const imageError = ref('')
-const previewURL = ref('')
+const previewURLs = ref<string[]>([])
 const editingTitle = ref(false)
 const titleDraft = ref('')
 const isDraft = computed(() => props.selected?.id.startsWith('draft:') ?? false)
@@ -53,15 +53,16 @@ let initiallyPositioned = false
 let positionedMessageCount = 0
 
 watch(() => props.composer, value => { draft.value = value })
-watch(() => props.image, value => {
-  selectedImage.value = value ?? null
+watch(() => props.images, value => {
+  const images = value ?? []
+  if (images.length !== selectedImages.value.length || images.some((image, index) => image !== selectedImages.value[index])) selectedImages.value = [...images]
 })
-watch(selectedImage, updatePreview, { immediate: true })
+watch(selectedImages, updatePreviews, { immediate: true })
 watch(() => props.selected?.id, async () => {
   closeMentionPicker()
   imageError.value = ''
   editingTitle.value = false
-  removeImage()
+  clearImages()
   await nextTick()
   if (isDraft.value) textarea.value?.focus()
 })
@@ -80,56 +81,70 @@ function submitTitle() {
 
 function selectImage(event: Event) {
   const input = event.target as HTMLInputElement
-  const file = input.files?.[0] ?? null
+  const files = Array.from(input.files ?? [])
   input.value = ''
-  selectImageFile(file)
+  selectImageFiles(files)
 }
 
-function selectImageFile(file: File | null) {
+function selectImageFiles(files: File[]) {
   imageError.value = ''
-  if (!file) return
-  if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024) {
-    imageError.value = 'Choose one JPEG or PNG up to 10 MB.'
+  if (!files.length) return
+  if (selectedImages.value.length + files.length > 10) {
+    imageError.value = 'Add no more than 10 images.'
     return
   }
-  selectedImage.value = file
-  emit('update:image', file)
+  if (files.some(file => !['image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024)) {
+    imageError.value = 'Choose JPEG or PNG images up to 10 MB each.'
+    return
+  }
+  if ([...selectedImages.value, ...files].reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) {
+    imageError.value = 'Images must be no more than 20 MB total.'
+    return
+  }
+  selectedImages.value = [...selectedImages.value, ...files]
+  emit('update:images', selectedImages.value)
 }
 
 function pasteImage(event: ClipboardEvent) {
-  const file = event.clipboardData?.files[0]
-  if (!file) return
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (!files.length) return
   event.preventDefault()
   if (props.busy || removedDirectConversation.value) return
-  selectImageFile(file)
+  selectImageFiles(files)
 }
 
 function dropImage(event: DragEvent) {
-  const file = event.dataTransfer?.files[0]
-  if (!file) return
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (!files.length) return
   event.preventDefault()
   if (props.busy || removedDirectConversation.value) return
-  selectImageFile(file)
+  selectImageFiles(files)
 }
 
 function allowImageDrop(event: DragEvent) {
   if (event.dataTransfer?.types.includes('Files')) event.preventDefault()
 }
 
-function removeImage() {
-  if (!selectedImage.value && !previewURL.value) return
-  selectedImage.value = null
+function removeImage(index: number) {
+  selectedImages.value = selectedImages.value.filter((_, imageIndex) => imageIndex !== index)
   imageError.value = ''
-  emit('update:image', null)
+  emit('update:images', selectedImages.value)
 }
 
-function updatePreview() {
-  if (previewURL.value && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(previewURL.value)
-  previewURL.value = selectedImage.value && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(selectedImage.value) : ''
+function clearImages() {
+  if (!selectedImages.value.length && !previewURLs.value.length) return
+  selectedImages.value = []
+  imageError.value = ''
+  emit('update:images', [])
+}
+
+function updatePreviews() {
+  if (typeof URL.revokeObjectURL === 'function') previewURLs.value.forEach(url => URL.revokeObjectURL(url))
+  previewURLs.value = typeof URL.createObjectURL === 'function' ? selectedImages.value.map(image => URL.createObjectURL(image)) : []
 }
 
 onBeforeUnmount(() => {
-  if (previewURL.value && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(previewURL.value)
+  if (typeof URL.revokeObjectURL === 'function') previewURLs.value.forEach(url => URL.revokeObjectURL(url))
 })
 
 function updateComposer(event: Event) {
@@ -304,9 +319,9 @@ function handleScroll() {
           <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
         </ul>
       </div>
-      <div v-if="selectedImage" data-testid="selected-image" class="selected-image"><img v-if="previewURL" :src="previewURL" alt="Selected image preview" /><span>{{ selectedImage.name }}</span><button data-testid="remove-image" type="button" aria-label="Remove selected image" @click="removeImage">Remove</button></div>
-      <div class="composer-actions"><label class="image-picker" :class="{ disabled: removedDirectConversation || selected.archived || busy }">Add image<input type="file" accept="image/jpeg,image/png" :disabled="removedDirectConversation || selected.archived || busy" @change="selectImage" /></label><button :disabled="removedDirectConversation || selected.archived || busy || (!draft.trim() && !selectedImage)" aria-label="Send message">Send</button></div>
-      <small>{{ selected.archived ? 'Restore this conversation to reply' : removedDirectConversation ? 'This conversation is unavailable' : 'Paste, drop or add a JPEG/PNG image · Enter to send' }}</small>
+      <div v-for="(selectedImage, index) in selectedImages" :key="`${selectedImage.name}-${selectedImage.size}-${selectedImage.lastModified}-${index}`" data-testid="selected-image" class="selected-image"><img v-if="previewURLs[index]" :src="previewURLs[index]" alt="Selected image preview" /><span>{{ selectedImage.name }}</span><button data-testid="remove-image" type="button" :aria-label="`Remove ${selectedImage.name}`" @click="removeImage(index)">Remove</button></div>
+      <div class="composer-actions"><label class="image-picker" :class="{ disabled: removedDirectConversation || selected.archived || busy }">Add images<input type="file" accept="image/jpeg,image/png" multiple :disabled="removedDirectConversation || selected.archived || busy" @change="selectImage" /></label><button :disabled="removedDirectConversation || selected.archived || busy || (!draft.trim() && !selectedImages.length)" aria-label="Send message">Send</button></div>
+      <small>{{ selected.archived ? 'Restore this conversation to reply' : removedDirectConversation ? 'This conversation is unavailable' : 'Paste, drop or add up to 10 JPEG/PNG images · 20 MB total · Enter to send' }}</small>
       <small v-if="imageError" class="image-error" role="alert">{{ imageError }}</small>
       <small v-if="(users ?? []).some(user => user.kind === 'bot')" data-testid="bot-guidance">{{ directBot ? `${directBot.name} responds automatically in this private chat.` : 'Bots respond when you @mention them.' }}</small>
     </form>

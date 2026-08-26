@@ -64,7 +64,7 @@ The Go binary embeds both SQL migrations and the built Vue files. Deployment the
 - **Organisation membership**: links a user to an organisation with `admin` or `member` role.
 - **Conversation**: organisation-wide or restricted to explicit members.
 - **Conversation membership**: grants access to a private conversation.
-- **Message**: immutable authored Markdown source with an optional idempotency identifier and at most one image attachment.
+- **Message**: immutable authored Markdown source with an optional idempotency identifier and up to ten image attachments.
 - **Attachment**: authorised metadata in SQLite pointing to immutable bytes through an opaque storage key.
 - **Human session**: opaque, expiring server-side login session.
 - **API key**: bot credential with a public lookup and hashed secret verifier.

@@ -44,7 +44,7 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - admin-only global conversation deletion;
 - chronological messages;
 - safe Markdown rendering, including code blocks;
-- one JPEG or PNG attachment up to 10 MB per message, stored locally behind authorised API access;
+- up to ten JPEG or PNG attachments per message, each up to 10 MB and together up to 20 MB, stored locally behind authorised API access;
 - one copy-once API key per bot initially;
 - HTTP API for history and mutations;
 - WebSocket delivery for new and missed events;

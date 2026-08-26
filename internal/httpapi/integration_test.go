@@ -1149,6 +1149,14 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = part.Write(imageBytes.Bytes())
+	secondPartHeaders := make(textproto.MIMEHeader)
+	secondPartHeaders.Set("Content-Disposition", `form-data; name="image"; filename="blue.png"`)
+	secondPartHeaders.Set("Content-Type", "image/png")
+	secondPart, err := writer.CreatePart(secondPartHeaders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = secondPart.Write(imageBytes.Bytes())
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1165,12 +1173,16 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	var message map[string]any
 	decodeResponse(t, response, http.StatusCreated, &message)
 	items, ok := message["attachments"].([]any)
-	if !ok || len(items) != 1 {
+	if !ok || len(items) != 2 {
 		t.Fatalf("attachments = %#v", message["attachments"])
 	}
 	attachment := items[0].(map[string]any)
 	if attachment["media_type"] != "image/png" || attachment["original_filename"] != "red.png" || attachment["width"] != float64(2) || attachment["height"] != float64(1) {
 		t.Fatalf("attachment = %#v", attachment)
+	}
+	secondAttachment := items[1].(map[string]any)
+	if secondAttachment["media_type"] != "image/png" || secondAttachment["original_filename"] != "blue.png" {
+		t.Fatalf("second attachment = %#v", secondAttachment)
 	}
 	var retryBody bytes.Buffer
 	retryWriter := multipart.NewWriter(&retryBody)
@@ -1190,17 +1202,22 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	}
 	var retriedMessage map[string]any
 	decodeResponse(t, retryResponse, http.StatusOK, &retriedMessage)
-	retriedAttachment := retriedMessage["attachments"].([]any)[0].(map[string]any)
+	retriedItems := retriedMessage["attachments"].([]any)
+	retriedIDs := map[any]bool{}
+	for _, retriedItem := range retriedItems {
+		retriedIDs[retriedItem.(map[string]any)["id"]] = true
+	}
 	files, err := os.ReadDir(uploadRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retriedAttachment["id"] != attachment["id"] || len(files) != 1 {
-		t.Fatalf("retry attachment=%#v files=%d", retriedAttachment, len(files))
+	if len(retriedItems) != 2 || retriedItems[0].(map[string]any)["original_filename"] != "red.png" || retriedItems[1].(map[string]any)["original_filename"] != "blue.png" || !retriedIDs[attachment["id"]] || !retriedIDs[secondAttachment["id"]] || len(files) != 2 {
+		t.Fatalf("retry attachments=%#v files=%d", retriedItems, len(files))
 	}
 	event := readEvent(t, socket)
 	payload := event["payload"].(map[string]any)
-	if event["type"] != "message.created" || len(payload["attachments"].([]any)) != 1 {
+	eventAttachments := payload["attachments"].([]any)
+	if event["type"] != "message.created" || len(eventAttachments) != 2 || eventAttachments[0].(map[string]any)["original_filename"] != "red.png" || eventAttachments[1].(map[string]any)["original_filename"] != "blue.png" {
 		t.Fatalf("event = %#v", event)
 	}
 	contentResponse, err := client.Get(server.URL + attachment["content_url"].(string))
@@ -1241,7 +1258,11 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	unauthorised.Body.Close()
 	var history []map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", "", nil), http.StatusOK, &history)
-	if len(history) != 1 || len(history[0]["attachments"].([]any)) != 1 {
+	if len(history) != 1 {
+		t.Fatalf("history = %#v", history)
+	}
+	historyAttachments := history[0]["attachments"].([]any)
+	if len(historyAttachments) != 2 || historyAttachments[0].(map[string]any)["original_filename"] != "red.png" || historyAttachments[1].(map[string]any)["original_filename"] != "blue.png" {
 		t.Fatalf("history = %#v", history)
 	}
 	var storageKey string
@@ -1259,6 +1280,116 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("open deleted attachment: %v", err)
 	}
+}
+
+func TestMessageImages_RejectsMoreThanTenImages(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "too-many-images.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := attachments.NewFilesystem(filepath.Join(t.TempDir(), "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db, Attachments: store}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	var imageBytes bytes.Buffer
+	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	for index := 0; index < 11; index++ {
+		headers := make(textproto.MIMEHeader)
+		headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="image-%d.png"`, index))
+		headers.Set("Content-Type", "image/png")
+		part, err := writer.CreatePart(headers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = part.Write(imageBytes.Bytes())
+	}
+	_ = writer.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &requestBody)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Origin", server.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+}
+
+func TestMessageImages_RejectsMoreThanTwentyMegabytesTotal(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "oversized-images.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRoot := filepath.Join(t.TempDir(), "uploads")
+	store, err := attachments.NewFilesystem(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db, Attachments: store}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	pixels := image.NewNRGBA(image.Rect(0, 0, 1500, 1500))
+	for index := range pixels.Pix {
+		pixels.Pix[index] = byte(index * 31)
+	}
+	var imageBytes bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := encoder.Encode(&imageBytes, pixels); err != nil {
+		t.Fatal(err)
+	}
+	if imageBytes.Len() >= 10<<20 {
+		t.Fatalf("fixture image is too large: %d", imageBytes.Len())
+	}
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	for index := 0; index < 3; index++ {
+		headers := make(textproto.MIMEHeader)
+		headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="large-%d.png"`, index))
+		headers.Set("Content-Type", "image/png")
+		part, err := writer.CreatePart(headers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = part.Write(imageBytes.Bytes())
+	}
+	_ = writer.Close()
+	if requestBody.Len() <= 20<<20 {
+		t.Fatalf("fixture request is too small: %d", requestBody.Len())
+	}
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &requestBody)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Origin", server.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
 }
 
 func TestMessageImage_RejectsDeclaredMediaTypeMismatchWithoutPersistingData(t *testing.T) {
