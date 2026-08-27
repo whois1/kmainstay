@@ -83,6 +83,7 @@ func New(deps Dependencies) http.Handler {
 		mux.Handle("DELETE /api/bots/{bot}/key", s.withAuth(http.HandlerFunc(s.revokeBotKey)))
 		mux.Handle("GET /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.messages)))
 		mux.Handle("POST /api/conversations/{conversation}/messages", s.withAuth(http.HandlerFunc(s.postMessage)))
+		mux.Handle("PUT /api/conversations/{conversation}/activity", s.withAuth(http.HandlerFunc(s.putConversationActivity)))
 		mux.Handle("GET /api/attachments/{attachment}/content", s.withAuth(http.HandlerFunc(s.attachmentContent)))
 		mux.Handle("PUT /api/conversations/{conversation}/read", s.withAuth(http.HandlerFunc(s.putConversationRead)))
 		mux.Handle("GET /api/ws", s.withAuth(http.HandlerFunc(s.webSocket)))
@@ -1061,6 +1062,48 @@ func deletePendingAttachments(store attachments.Store, pendingAttachments []*pen
 	}
 }
 
+type conversationActivity struct {
+	ConversationID string `json:"conversation_id"`
+	UserID         string `json:"user_id"`
+	UserName       string `json:"user_name"`
+	UserKind       string `json:"user_kind"`
+	Active         bool   `json:"active"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
+func (s *server) putConversationActivity(w http.ResponseWriter, r *http.Request) {
+	p := current(r)
+	conversationID := r.PathValue("conversation")
+	if p.Kind != "bot" || !s.canAccess(r.Context(), conversationID, p.ID) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	var input struct {
+		Active *bool `json:"active"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if input.Active == nil {
+		writeError(w, http.StatusBadRequest, "active is required")
+		return
+	}
+	active := *input.Active
+	expiresAt := time.Now().UTC()
+	if active {
+		expiresAt = expiresAt.Add(6 * time.Second)
+	}
+	s.hub.publishActivity(conversationActivity{
+		ConversationID: conversationID,
+		UserID:         p.ID,
+		UserName:       p.Name,
+		UserKind:       p.Kind,
+		Active:         active,
+		ExpiresAt:      expiresAt.Format(time.RFC3339Nano),
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *server) putConversationRead(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.PathValue("conversation")
 	p := current(r)
@@ -1435,6 +1478,17 @@ func (s *server) webSocket(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			for _, activity := range s.hub.takeActivities(subscriptionID) {
+				if !s.canAccess(ctx, activity.ConversationID, p.ID) {
+					continue
+				}
+				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := wsjson.Write(writeCtx, c, map[string]any{"version": 1, "type": "conversation.activity", "payload": activity})
+				cancel()
+				if err != nil {
+					return
+				}
+			}
 			if err := replay(); err != nil {
 				return
 			}
@@ -1589,6 +1643,7 @@ type hub struct {
 type hubSubscriber struct {
 	wake                 chan struct{}
 	changedConversations map[string]map[string]struct{}
+	activities           map[string]conversationActivity
 }
 
 func newHub() *hub { return &hub{subs: map[int]*hubSubscriber{}} }
@@ -1597,7 +1652,7 @@ func (h *hub) subscribe() (int, <-chan struct{}, func()) {
 	defer h.mu.Unlock()
 	id := h.next
 	h.next++
-	subscriber := &hubSubscriber{wake: make(chan struct{}, 64), changedConversations: map[string]map[string]struct{}{}}
+	subscriber := &hubSubscriber{wake: make(chan struct{}, 64), changedConversations: map[string]map[string]struct{}{}, activities: map[string]conversationActivity{}}
 	h.subs[id] = subscriber
 	return id, subscriber.wake, func() { h.mu.Lock(); delete(h.subs, id); h.mu.Unlock() }
 }
@@ -1623,6 +1678,35 @@ func (h *hub) publishEvent(organisationID, conversationID string) {
 		}
 	}
 }
+
+func (h *hub) publishActivity(activity conversationActivity) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	key := activity.ConversationID + "\x00" + activity.UserID
+	for _, subscriber := range h.subs {
+		subscriber.activities[key] = activity
+		select {
+		case subscriber.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (h *hub) takeActivities(subscriptionID int) []conversationActivity {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subscriber := h.subs[subscriptionID]
+	if subscriber == nil || len(subscriber.activities) == 0 {
+		return nil
+	}
+	activities := make([]conversationActivity, 0, len(subscriber.activities))
+	for _, activity := range subscriber.activities {
+		activities = append(activities, activity)
+	}
+	subscriber.activities = map[string]conversationActivity{}
+	return activities
+}
+
 func (h *hub) takeChangedConversations(subscriptionID int) map[string]map[string]struct{} {
 	h.mu.Lock()
 	defer h.mu.Unlock()

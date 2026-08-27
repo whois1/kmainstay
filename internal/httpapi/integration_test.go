@@ -61,6 +61,71 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	}
 }
 
+func TestConversationActivity_BotStartAndStopBroadcastWithoutPersistence(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "activity.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	socket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Cookie": {sessionCookieFor(t, client, server.URL).String()}})
+	defer socket.CloseNow()
+
+	response := requestJSON(t, http.DefaultClient, http.MethodPut, server.URL+"/api/conversations/"+boot.ConversationID+"/activity", "", bot["api_key"].(string), map[string]any{"active": true})
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	event := readEvent(t, socket)
+	payload := event["payload"].(map[string]any)
+	expiresAt, err := time.Parse(time.RFC3339Nano, payload["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event["type"] != "conversation.activity" || payload["conversation_id"] != boot.ConversationID || payload["user_id"] != bot["id"] || payload["user_name"] != "Hector" || payload["user_kind"] != "bot" || payload["active"] != true || time.Until(expiresAt) < 5*time.Second || time.Until(expiresAt) > 7*time.Second {
+		t.Fatalf("activity event = %#v", event)
+	}
+	response = requestJSON(t, http.DefaultClient, http.MethodPut, server.URL+"/api/conversations/"+boot.ConversationID+"/activity", "", bot["api_key"].(string), map[string]any{"active": false})
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("stop status = %d, want 204: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	stopped := readEvent(t, socket)
+	stoppedPayload := stopped["payload"].(map[string]any)
+	if stopped["type"] != "conversation.activity" || stoppedPayload["active"] != false || stoppedPayload["user_id"] != bot["id"] {
+		t.Fatalf("stopped activity event = %#v", stopped)
+	}
+	var messages, realtimeEvents int
+	if err := db.QueryRow(`SELECT count(*) FROM messages`).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_events`).Scan(&realtimeEvents); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 || realtimeEvents != 0 {
+		t.Fatalf("messages=%d realtime_events=%d", messages, realtimeEvents)
+	}
+	humanResponse := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+boot.ConversationID+"/activity", server.URL, "", map[string]any{"active": true})
+	if humanResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("human activity status = %d, want 403: %s", humanResponse.StatusCode, readBody(humanResponse))
+	}
+	humanResponse.Body.Close()
+	missingActive := requestJSON(t, http.DefaultClient, http.MethodPut, server.URL+"/api/conversations/"+boot.ConversationID+"/activity", "", bot["api_key"].(string), map[string]any{})
+	if missingActive.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing active status = %d, want 400: %s", missingActive.StatusCode, readBody(missingActive))
+	}
+	missingActive.Body.Close()
+}
+
 func TestMessages_ExposeReplySummary(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "message-replies.db"))
 	if err != nil {

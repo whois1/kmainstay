@@ -129,6 +129,10 @@ aside { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direc
 .composer textarea { min-height: 48px; max-height: 160px; field-sizing: content; overflow-y: auto; resize: none; border: 0; padding: 8px; background: transparent; }
 .composer button { align-self: start; }
 .composer small { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+.agent-activity { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; color: var(--secondary); font-size: 13px; }
+.activity-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: activity-pulse 1.2s ease-in-out infinite; }
+@keyframes activity-pulse { 50% { opacity: .35; transform: scale(.75); } }
+@media (prefers-reduced-motion: reduce) { .activity-dot { animation: none; } }
 .composer-input { position: relative; min-width: 0; }
 .composer-input textarea { width: 100%; }
 .composer-actions { display: flex; align-items: flex-start; gap: 8px; }
