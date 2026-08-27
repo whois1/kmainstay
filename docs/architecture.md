@@ -87,7 +87,7 @@ Organisation administration deliberately uses only two membership roles. The boo
 - Every message has exactly one user author.
 - Humans and bots use the same create-message path.
 - Messages are persisted before realtime fan-out.
-- Complete messages only; no response deltas or activity events.
+- Complete messages only; no response deltas. Bot working activity is an ephemeral, expiring signal rather than message history.
 - Bot-authored events are not delivered to other bots.
 - The bot runtime decides whether to respond to ordinary messages or mentions.
 - Messages accept bounded Markdown source text.
@@ -127,7 +127,9 @@ A versioned envelope uses `message.created` for durable message delivery:
 }
 ```
 
-Events are durable. The server subscribes before replay. A reconnecting client supplies its last fully processed sequence and receives every currently accessible later event. Live hub notifications are wake-up signals only: after any wake, the server queries all authorized durable events beyond the last delivered sequence, so notification coalescing or drops cannot make delivery gaps. Delivery is at least once; clients deduplicate by event/message ID.
+Message events are durable. The server subscribes before replay. A reconnecting client supplies its last fully processed sequence and receives every currently accessible later event. Live hub notifications are wake-up signals only: after any wake, the server queries all authorized durable events beyond the last delivered sequence, so notification coalescing or drops cannot make delivery gaps. Delivery is at least once; clients deduplicate by event/message ID.
+
+Bot participants may also publish `conversation.activity` start, refresh and stop signals. These have no sequence and are never stored. An active signal carries a six-second expiry, while the bot runtime refreshes it every two seconds; the browser removes it on explicit stop, complete bot output, or expiry. This bounds stale “working” state after crashes without adding a database lifecycle.
 
 The connection context ends when the peer closes, and every server write has a short deadline. API-key revocation prevents new requests and reconnects but does not forcibly terminate a connection that completed its authentication handshake. Conversation authorization is re-evaluated for each replay batch, so removed access stops subsequent delivery; clients reconnect after any socket close using their last fully processed sequence.
 

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import BaseDialog from './components/BaseDialog.vue'
 import ConversationView from './components/ConversationView.vue'
 import OrganisationSettings from './components/OrganisationSettings.vue'
 import WorkspaceSidebar from './components/WorkspaceSidebar.vue'
 import { useRealtime } from './composables/realtime'
-import type { Conversation, EligibleUser, Message, Organisation, Principal, User } from './types'
+import type { Conversation, ConversationActivity, EligibleUser, Message, Organisation, Principal, User } from './types'
 
 document.documentElement.dataset.theme = 'dark'
 document.documentElement.style.colorScheme = 'dark'
@@ -58,8 +58,36 @@ let loadingConversationID: string | null = null
 let pendingRealtimeMessages: Message[] = []
 const pendingDirectUserIDs = new Set<string>()
 const archiveStateGenerations = new Map<string, number>()
+const activities = ref<Record<string, ConversationActivity>>({})
+const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const selectedActivities = computed(() => Object.values(activities.value).filter(activity => activity.conversation_id === selected.value?.id))
+
+function activityKey(conversationID: string, userID: string) {
+  return `${conversationID}\u0000${userID}`
+}
+
+function clearActivity(conversationID: string, userID: string) {
+  const key = activityKey(conversationID, userID)
+  const timer = activityTimers.get(key)
+  if (timer) clearTimeout(timer)
+  activityTimers.delete(key)
+  if (!(key in activities.value)) return
+  const next = { ...activities.value }
+  delete next[key]
+  activities.value = next
+}
+
+function updateActivity(activity: ConversationActivity) {
+  const expiresAt = Date.parse(activity.expires_at)
+  clearActivity(activity.conversation_id, activity.user_id)
+  if (!activity.active || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return
+  const key = activityKey(activity.conversation_id, activity.user_id)
+  activities.value = { ...activities.value, [key]: activity }
+  activityTimers.set(key, setTimeout(() => clearActivity(activity.conversation_id, activity.user_id), expiresAt - Date.now()))
+}
 
 const realtime = useRealtime((message) => {
+  if (message.author_kind === 'bot') clearActivity(message.conversation_id, message.author_id)
   const conversation = conversations.value.find(({ id }) => id === message.conversation_id)
   if (conversation) {
     archiveStateGenerations.set(conversation.id, (archiveStateGenerations.get(conversation.id) ?? 0) + 1)
@@ -78,7 +106,7 @@ const realtime = useRealtime((message) => {
   if (message.conversation_id === selected.value?.id && !hasNewerMessages.value && !messages.value.some(({ id }) => id === message.id)) {
     messages.value.push(message)
   }
-}, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations)
+}, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations, updateActivity)
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetcher(url, init)
@@ -656,7 +684,11 @@ function jsonInit(method: string, body?: unknown): RequestInit {
 }
 function messageOf(cause: unknown) { return cause instanceof Error ? cause.message : 'Something went wrong' }
 onMounted(initialise)
-onBeforeUnmount(realtime.disconnect)
+onBeforeUnmount(() => {
+  realtime.disconnect()
+  for (const timer of activityTimers.values()) clearTimeout(timer)
+  activityTimers.clear()
+})
 </script>
 
 <template>
@@ -670,7 +702,7 @@ onBeforeUnmount(realtime.disconnect)
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :images="images" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:images="updateImagesDraft" @update-title="updateConversationTitle" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :images="images" :activities="selectedActivities" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:images="updateImagesDraft" @update-title="updateConversationTitle" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 

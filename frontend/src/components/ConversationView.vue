@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../markdown'
-import type { Conversation, Message, User } from '../types'
+import type { Conversation, ConversationActivity, Message, User } from '../types'
 
-const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; images?: File[]; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number; replyingTo?: Message | null }>()
+const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; images?: File[]; activities?: ConversationActivity[]; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number; replyingTo?: Message | null }>()
 const emit = defineEmits<{ deleteConversation: []; archiveConversation: []; restoreConversation: []; newTopic: []; updateTitle: [name: string]; replyTo: [message: Message]; cancelReply: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:images': [value: File[]] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
@@ -44,6 +44,11 @@ const conversationContext = computed(() => {
   if (removedDirectConversation.value) return 'This person is no longer available'
   if (directUser.value) return `With ${directUser.value.name}`
   return props.selected?.visibility === 'members' ? 'Private conversation' : 'Everyone in the organisation'
+})
+const activityText = computed(() => {
+  const names = [...new Set((props.activities ?? []).map(activity => activity.user_name))]
+  if (names.length === 1) return `${names[0]} is working…`
+  return `${names.join(', ')} are working…`
 })
 const directBot = computed(() => {
   return directUser.value?.kind === 'bot' ? directUser.value : null
@@ -313,6 +318,7 @@ function handleScroll() {
       <button v-if="showJumpToBottom" data-testid="jump-to-bottom" class="jump-to-bottom" type="button" aria-label="Jump to latest message" @click="jumpToBottom">↓</button>
     </div>
     <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')" @dragover="allowImageDrop" @drop="dropImage">
+      <div v-if="activities?.length" class="agent-activity" data-testid="agent-activity" role="status" aria-live="polite" aria-atomic="true"><span class="activity-dot" aria-hidden="true"></span>{{ activityText }}</div>
       <div v-if="replyingTo" data-testid="reply-preview" class="reply-preview"><div><strong>Replying to {{ replyingTo.author_name }}</strong><span>{{ replyingTo.body }}</span></div><button type="button" aria-label="Cancel reply" @click="$emit('cancelReply')">×</button></div>
       <div class="composer-input"><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation || selected.archived" :placeholder="selected.archived ? 'Restore this conversation to reply' : removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" @paste="pasteImage" />
         <ul v-if="pickerVisible" id="mention-suggestions" class="mention-picker" role="listbox" aria-label="Mention a person or bot">

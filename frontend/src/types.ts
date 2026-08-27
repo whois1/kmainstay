@@ -2,6 +2,7 @@ export interface Principal { id: string; kind: 'human' | 'bot'; name: string }
 export type OrganisationRole = 'admin' | 'member'
 export interface Organisation { id: string; name: string; role: OrganisationRole }
 export interface Conversation { id: string; name: string; visibility: 'organisation' | 'members'; member_ids?: string[]; read_sequence?: number; latest_sequence?: number; activity_at?: string; title_automatic?: boolean; archived?: boolean }
+export interface ConversationActivity { conversation_id: string; user_id: string; user_name: string; user_kind: 'bot'; active: boolean; expires_at: string }
 export interface MessageReply { id: string; author_name: string; body: string }
 export interface MentionedUser { id: string; name: string }
 export interface Attachment {
