@@ -1,8 +1,9 @@
-import type { Message } from '../types'
+import type { ConversationActivity, Message } from '../types'
 
 interface MessageCreatedEnvelope { type: 'message.created'; sequence: number; payload: Message }
 interface ConversationDeletedEnvelope { type: 'conversation.deleted'; payload: { id: string } }
-type EventEnvelope = MessageCreatedEnvelope | ConversationDeletedEnvelope
+interface ConversationActivityEnvelope { type: 'conversation.activity'; payload: ConversationActivity }
+type EventEnvelope = MessageCreatedEnvelope | ConversationDeletedEnvelope | ConversationActivityEnvelope
 type Socket = Pick<WebSocket, 'onopen' | 'onmessage' | 'onclose' | 'close'>
 type SocketConstructor = new (url: string) => Socket
 
@@ -11,6 +12,7 @@ export function useRealtime(
   Socket: SocketConstructor = WebSocket,
   onConversationDeleted: (conversationID: string) => void = () => {},
   onReconnect: () => void = () => {},
+  onActivity: (activity: ConversationActivity) => void = () => {},
 ) {
   let socket: Socket | undefined
   let stopped = false
@@ -25,6 +27,10 @@ export function useRealtime(
     socket.onopen = onReconnect
     socket.onmessage = (raw) => {
       const event = JSON.parse(String(raw.data)) as EventEnvelope
+      if (event.type === 'conversation.activity') {
+        onActivity(event.payload)
+        return
+      }
       if (event.type === 'conversation.deleted') {
         onConversationDeleted(event.payload.id)
         return

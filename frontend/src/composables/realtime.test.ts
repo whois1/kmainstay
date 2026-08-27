@@ -16,7 +16,8 @@ describe('realtime connection', () => {
     const received: string[] = []
     const deleted = vi.fn()
     const reconnected = vi.fn()
-    const realtime = useRealtime((message) => received.push(message.id), FakeSocket as unknown as typeof WebSocket, deleted, reconnected)
+    const activity = vi.fn()
+    const realtime = useRealtime((message) => received.push(message.id), FakeSocket as unknown as typeof WebSocket, deleted, reconnected, activity)
     realtime.connect()
     expect(FakeSocket.instances[0].url).toMatch(/after=0$/)
     FakeSocket.instances[0].onopen?.()
@@ -25,8 +26,11 @@ describe('realtime connection', () => {
     FakeSocket.instances[0].onmessage?.(event)
     FakeSocket.instances[0].onmessage?.(event)
     FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'conversation.deleted', payload: { id: 'con_1' } }) } as MessageEvent)
+    const activityPayload = { conversation_id: 'con_1', user_id: 'bot_1', user_name: 'Hector', user_kind: 'bot', active: true, expires_at: '2026-08-27T12:00:06Z' }
+    FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'conversation.activity', payload: activityPayload }) } as MessageEvent)
     expect(received).toEqual(['msg_1'])
     expect(deleted).toHaveBeenCalledWith('con_1')
+    expect(activity).toHaveBeenCalledWith(activityPayload)
     FakeSocket.instances[0].onclose?.()
     vi.advanceTimersByTime(1000)
     expect(FakeSocket.instances[1].url).toMatch(/after=7$/)

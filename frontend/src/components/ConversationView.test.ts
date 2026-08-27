@@ -239,6 +239,15 @@ describe('ConversationView', () => {
     expect(group.get('[data-testid=bot-guidance]').text()).toContain('@mention')
   })
 
+  it('shows which bot is actively working near the composer', () => {
+    const activities = [{ conversation_id: conversation.id, user_id: 'hector', user_name: 'Hector', user_kind: 'bot' as const, active: true, expires_at: '2026-08-27T12:00:06Z' }]
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', activities, busy: false, error: '', canDelete: false } })
+
+    const status = wrapper.get('[data-testid=agent-activity]')
+    expect(status.text()).toBe('Hector is working…')
+    expect(status.attributes('role')).toBe('status')
+  })
+
   it('uses the topic for direct-chat titles and identifies the other person beneath it', () => {
     const direct = mount(ConversationView, { props: { selected: { ...conversation, name: 'Agent navigation', visibility: 'members', member_ids: ['reader', 'hector'] }, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
     expect(direct.get('h1').text()).toBe('Agent navigation')

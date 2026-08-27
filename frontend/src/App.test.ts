@@ -256,6 +256,50 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('[data-testid=bulk-conversation-actions]').text()).toContain('1 selected')
   })
 
+  it('refreshes, expires and explicitly clears bot activity', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-27T12:00:00Z'))
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(loadedFetcher()), socketFactory: EventSocket } } })
+    await flushPromises()
+    const sendActivity = (active: boolean, expiresAt = new Date(Date.now() + 6000).toISOString()) => {
+      EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'conversation.activity', payload: { conversation_id: 'c1', user_id: 'b1', user_name: 'Hector', user_kind: 'bot', active, expires_at: expiresAt } }) } as MessageEvent)
+    }
+
+    sendActivity(true)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-testid=agent-activity]').text()).toBe('Hector is working…')
+
+    vi.advanceTimersByTime(5000)
+    sendActivity(true)
+    vi.advanceTimersByTime(1001)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid=agent-activity]').exists()).toBe(true)
+    vi.advanceTimersByTime(5000)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid=agent-activity]').exists()).toBe(false)
+
+    sendActivity(true)
+    sendActivity(false)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid=agent-activity]').exists()).toBe(false)
+
+    sendActivity(true)
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 1, payload: { id: 'm1', conversation_id: 'c1', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: 'Done', created_at: new Date().toISOString(), sequence: 1 } }) } as MessageEvent)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid=agent-activity]').exists()).toBe(false)
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
   it('uses the fetched active state when message activity commits after an archive', async () => {
     class EventSocket {
       static instance: EventSocket
