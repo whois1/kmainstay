@@ -60,16 +60,54 @@ describe('ConversationView', () => {
     expect(wrapper.find('.markdown').exists()).toBe(false)
   })
 
-  it('selects and removes one JPEG or PNG from the composer', async () => {
+  it('selects multiple JPEG or PNG images from the composer', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
-    const file = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' })
+    const first = new File([new Uint8Array([1, 2, 3])], 'first.png', { type: 'image/png' })
+    const second = new File([new Uint8Array([4, 5, 6])], 'second.jpg', { type: 'image/jpeg' })
     const input = wrapper.get('input[type=file]')
-    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [first] })
     await input.trigger('change')
-    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
-    expect(wrapper.get('[data-testid=selected-image]').text()).toContain('photo.png')
-    await wrapper.get('[data-testid=remove-image]').trigger('click')
-    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([null])
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [second] })
+    await input.trigger('change')
+
+    expect(input.attributes('multiple')).toBeDefined()
+    expect(wrapper.emitted('update:images')?.at(-1)).toEqual([[first, second]])
+    expect(wrapper.findAll('[data-testid=selected-image]').map(item => item.text())).toEqual(['first.pngRemove', 'second.jpgRemove'])
+  })
+
+  it('rejects more than ten selected images before sending', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const files = Array.from({ length: 11 }, (_, index) => new File([new Uint8Array([index])], `image-${index}.png`, { type: 'image/png' }))
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: files })
+
+    await input.trigger('change')
+
+    expect(wrapper.get('[role=alert]').text()).toBe('Add no more than 10 images.')
+    expect(wrapper.emitted('update:images')).toBeUndefined()
+  })
+
+  it('rejects images larger than 20 MB in total before sending', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const files = Array.from({ length: 3 }, (_, index) => new File([new Uint8Array(7 * 1024 * 1024)], `image-${index}.png`, { type: 'image/png' }))
+    const input = wrapper.get('input[type=file]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: files })
+
+    await input.trigger('change')
+
+    expect(wrapper.get('[role=alert]').text()).toBe('Images must be no more than 20 MB total.')
+    expect(wrapper.emitted('update:images')).toBeUndefined()
+  })
+
+  it('removes one selected image without clearing the others', async () => {
+    const first = new File([new Uint8Array([1])], 'first.png', { type: 'image/png' })
+    const second = new File([new Uint8Array([2])], 'second.png', { type: 'image/png' })
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', images: [first, second], busy: false, error: '', canDelete: false } })
+
+    await wrapper.findAll('[data-testid=remove-image]')[0].trigger('click')
+
+    expect(wrapper.emitted('update:images')?.at(-1)).toEqual([[second]])
+    expect(wrapper.findAll('[data-testid=selected-image]').map(item => item.text())).toEqual(['second.pngRemove'])
   })
 
   it('keeps the selected image preview URL valid when the parent stores the file', async () => {
@@ -83,7 +121,7 @@ describe('ConversationView', () => {
       Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
 
       await input.trigger('change')
-      await wrapper.setProps({ image: file })
+      await wrapper.setProps({ images: [file] })
 
       expect(wrapper.get('[data-testid=selected-image] img').attributes('src')).toBe('blob:selected-image')
       expect(createObjectURL).toHaveBeenCalledTimes(1)
@@ -105,7 +143,7 @@ describe('ConversationView', () => {
     await wrapper.vm.$nextTick()
 
     expect(paste.defaultPrevented).toBe(true)
-    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
+    expect(wrapper.emitted('update:images')?.at(-1)).toEqual([[file]])
     expect(wrapper.get('[data-testid=selected-image]').text()).toContain('pasted.png')
   })
 
@@ -119,7 +157,7 @@ describe('ConversationView', () => {
     await wrapper.vm.$nextTick()
 
     expect(drop.defaultPrevented).toBe(true)
-    expect(wrapper.emitted('update:image')?.at(-1)).toEqual([file])
+    expect(wrapper.emitted('update:images')?.at(-1)).toEqual([[file]])
     expect(wrapper.get('[data-testid=selected-image]').text()).toContain('dropped.jpg')
   })
 
@@ -131,7 +169,7 @@ describe('ConversationView', () => {
     wrapper.get('[data-testid=composer]').element.dispatchEvent(drop)
 
     expect(drop.defaultPrevented).toBe(false)
-    expect(wrapper.emitted('update:image')).toBeUndefined()
+    expect(wrapper.emitted('update:images')).toBeUndefined()
   })
 
   it('clears an invalid image error when changing conversations', async () => {

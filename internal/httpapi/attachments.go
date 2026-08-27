@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -23,9 +24,11 @@ import (
 )
 
 const (
-	maximumImageBytes    = 10 << 20
-	maximumImagePixels   = 16_000_000
-	multipartMemoryBytes = 1 << 20
+	maximumImageBytes        = 10 << 20
+	maximumImagesPerMessage  = 10
+	maximumMessageImageBytes = 20 << 20
+	maximumImagePixels       = 16_000_000
+	multipartMemoryBytes     = 1 << 20
 )
 
 type attachment struct {
@@ -51,7 +54,7 @@ type messageInput struct {
 	Body             string
 	ClientID         string
 	ReplyToMessageID string
-	Attachment       *pendingAttachment
+	Attachments      []*pendingAttachment
 }
 
 func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (messageInput, bool) {
@@ -77,7 +80,7 @@ func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (mes
 	if err := responseController.SetReadDeadline(time.Now().Add(60 * time.Second)); err == nil {
 		defer responseController.SetReadDeadline(time.Time{})
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maximumImageBytes+(64<<10))
+	r.Body = http.MaxBytesReader(w, r.Body, maximumMessageImageBytes+(64<<10))
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid image upload")
 		return messageInput{}, false
@@ -90,42 +93,54 @@ func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (mes
 	if len(files) == 0 {
 		return input, true
 	}
-	if len(files) != 1 || len(r.MultipartForm.File) != 1 {
-		writeError(w, http.StatusBadRequest, "one image is allowed")
+	if len(files) > maximumImagesPerMessage || len(r.MultipartForm.File) != 1 {
+		writeError(w, http.StatusBadRequest, "up to 10 images are allowed")
 		return messageInput{}, false
 	}
-	declaredMediaType, _, err := mime.ParseMediaType(files[0].Header.Get("Content-Type"))
+	totalBytes := 0
+	for _, fileHeader := range files {
+		pending, errorMessage := decodePendingAttachment(fileHeader)
+		if errorMessage != "" {
+			writeError(w, http.StatusBadRequest, errorMessage)
+			return messageInput{}, false
+		}
+		totalBytes += len(pending.Bytes)
+		if totalBytes > maximumMessageImageBytes {
+			writeError(w, http.StatusBadRequest, "images must be no more than 20 MB total")
+			return messageInput{}, false
+		}
+		input.Attachments = append(input.Attachments, pending)
+	}
+	return input, true
+}
+
+func decodePendingAttachment(fileHeader *multipart.FileHeader) (*pendingAttachment, string) {
+	declaredMediaType, _, err := mime.ParseMediaType(fileHeader.Header.Get("Content-Type"))
 	if err != nil || (declaredMediaType != "image/jpeg" && declaredMediaType != "image/png") {
-		writeError(w, http.StatusBadRequest, "image must declare JPEG or PNG content")
-		return messageInput{}, false
+		return nil, "image must declare JPEG or PNG content"
 	}
-	file, err := files[0].Open()
+	file, err := fileHeader.Open()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid image upload")
-		return messageInput{}, false
+		return nil, "invalid image upload"
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maximumImageBytes+1))
 	file.Close()
 	if err != nil || len(data) == 0 || len(data) > maximumImageBytes {
-		writeError(w, http.StatusBadRequest, "invalid image upload")
-		return messageInput{}, false
+		return nil, "invalid image upload"
 	}
 	mediaType := http.DetectContentType(data)
 	if mediaType != declaredMediaType {
-		writeError(w, http.StatusBadRequest, "image must be JPEG or PNG")
-		return messageInput{}, false
+		return nil, "image must be JPEG or PNG"
 	}
 	configuration, decodedType, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || "image/"+decodedType != mediaType || configuration.Width <= 0 || configuration.Height <= 0 || configuration.Width > 10_000 || configuration.Height > 10_000 || int64(configuration.Width)*int64(configuration.Height) > maximumImagePixels {
-		writeError(w, http.StatusBadRequest, "invalid image dimensions")
-		return messageInput{}, false
+		return nil, "invalid image dimensions"
 	}
 	decodedImage, fullyDecodedType, err := image.Decode(bytes.NewReader(data))
 	if err != nil || fullyDecodedType != decodedType || decodedImage.Bounds().Dx() != configuration.Width || decodedImage.Bounds().Dy() != configuration.Height {
-		writeError(w, http.StatusBadRequest, "invalid image data")
-		return messageInput{}, false
+		return nil, "invalid image data"
 	}
-	filename := filepath.Base(strings.TrimSpace(files[0].Filename))
+	filename := filepath.Base(strings.TrimSpace(fileHeader.Filename))
 	filename = strings.ToValidUTF8(filename, "�")
 	if filename == "." || filename == "" {
 		filename = "image"
@@ -148,8 +163,7 @@ func (s *server) decodeMessageInput(w http.ResponseWriter, r *http.Request) (mes
 		SHA256:           hex.EncodeToString(digest[:]),
 	}
 	item.ContentURL = "/api/attachments/" + item.ID + "/content"
-	input.Attachment = &pendingAttachment{attachment: item, Bytes: data}
-	return input, true
+	return &pendingAttachment{attachment: item, Bytes: data}, ""
 }
 
 func (s *server) messageAttachments(ctx context.Context, messageID string) ([]attachment, error) {
@@ -157,7 +171,7 @@ func (s *server) messageAttachments(ctx context.Context, messageID string) ([]at
 }
 
 func queryMessageAttachments(ctx context.Context, queryable queryer, messageID string) ([]attachment, error) {
-	rows, err := queryable.QueryContext(ctx, `SELECT id,message_id,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at FROM attachments WHERE message_id=? ORDER BY created_at,id`, messageID)
+	rows, err := queryable.QueryContext(ctx, `SELECT id,message_id,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at FROM attachments WHERE message_id=? ORDER BY position,id`, messageID)
 	if err != nil {
 		return nil, err
 	}

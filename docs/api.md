@@ -25,7 +25,7 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 | `DELETE` | `/api/organisations/{organisation}/bots/{bot}` | organisation admin | — | `204` |
 | `POST/DELETE` | `/api/bots/{bot}/key` | organisation admin | — | `201 {"api_key":"…"}` / `204` |
 | `GET` | `/api/conversations/{conversation}/messages?limit=50&before={message_id}` or `?limit=100&after_sequence={sequence}` | participant | — | `200 Message[]`, oldest-first |
-| `POST` | `/api/conversations/{conversation}/messages` | participant | JSON `CreateMessageRequest`, or multipart `body`, `client_id`, `reply_to_message_id`, `image` | `201 Message`; retry `200 Message` |
+| `POST` | `/api/conversations/{conversation}/messages` | participant | JSON `CreateMessageRequest`, or multipart `body`, `client_id`, `reply_to_message_id`, repeated `image` | `201 Message`; retry `200 Message` |
 | `GET` | `/api/attachments/{attachment}/content` | participant | — | authorised JPEG or PNG bytes |
 | `PUT` | `/api/conversations/{conversation}/read` | participant | `ReadPositionRequest` | `200 ReadPosition` |
 | `GET` | `/api/ws?after={sequence}` | either | WebSocket | `MessageCreatedEvent` and `ConversationDeletedEvent` stream |
@@ -42,7 +42,7 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
   "MentionedUser":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}}},
   "Attachment":{"type":"object","required":["id","media_type","byte_size","width","height","original_filename","created_at","content_url"],"properties":{"id":{"type":"string"},"media_type":{"enum":["image/jpeg","image/png"]},"byte_size":{"type":"integer","minimum":1,"maximum":10485760},"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1},"original_filename":{"type":"string"},"created_at":{"type":"string","format":"date-time"},"content_url":{"type":"string"}}},
   "MessageReply":{"type":"object","required":["id","author_name","body"],"properties":{"id":{"type":"string"},"author_name":{"type":"string"},"body":{"type":"string"}}},
-  "Message":{"type":"object","required":["id","conversation_id","author_id","author_name","author_kind","body","created_at","sequence","mentions","attachments"],"properties":{"id":{"type":"string"},"conversation_id":{"type":"string"},"author_id":{"type":"string"},"author_name":{"type":"string"},"author_kind":{"enum":["human","bot"]},"body":{"type":"string","maxLength":20000},"client_id":{"type":"string"},"reply_to":{"$ref":"#/$defs/MessageReply"},"created_at":{"type":"string","format":"date-time"},"sequence":{"type":"integer","minimum":1},"mentions":{"type":"array","items":{"$ref":"#/$defs/MentionedUser"},"uniqueItems":true},"attachments":{"type":"array","maxItems":1,"items":{"$ref":"#/$defs/Attachment"}}}},
+  "Message":{"type":"object","required":["id","conversation_id","author_id","author_name","author_kind","body","created_at","sequence","mentions","attachments"],"properties":{"id":{"type":"string"},"conversation_id":{"type":"string"},"author_id":{"type":"string"},"author_name":{"type":"string"},"author_kind":{"enum":["human","bot"]},"body":{"type":"string","maxLength":20000},"client_id":{"type":"string"},"reply_to":{"$ref":"#/$defs/MessageReply"},"created_at":{"type":"string","format":"date-time"},"sequence":{"type":"integer","minimum":1},"mentions":{"type":"array","items":{"$ref":"#/$defs/MentionedUser"},"uniqueItems":true},"attachments":{"type":"array","maxItems":10,"items":{"$ref":"#/$defs/Attachment"}}}},
   "LoginRequest":{"type":"object","required":["email","password"],"properties":{"email":{"type":"string"},"password":{"type":"string"}}},
   "CreateConversationRequest":{"type":"object","required":["name","visibility","member_ids"],"properties":{"name":{"type":"string"},"visibility":{"enum":["organisation","members"]},"member_ids":{"type":"array","items":{"type":"string"},"uniqueItems":true},"automatic_title":{"type":"boolean"}}},
   "UpdateConversationTitleRequest":{"type":"object","required":["name"],"properties":{"name":{"type":"string","minLength":1,"maxLength":20000}}},
@@ -60,12 +60,12 @@ Humans use the `kmainstay_session` HttpOnly, SameSite=Lax cookie returned by `PO
 
 ## Image messages
 
-Send text-only messages as JSON. Send a message with one image as multipart form data with these fields:
+Send text-only messages as JSON. Send a message with images as multipart form data with these fields:
 
 - `body`: optional caption, at most 20,000 characters;
 - `client_id`: optional idempotency identifier, at most 200 characters;
 - `reply_to_message_id`: optional message in the same conversation;
-- `image`: one JPEG or PNG whose encoded size is at most 10 MB and whose decoded dimensions are at most 10,000 by 10,000 and 16 million pixels.
+- `image`: one to ten repeated JPEG or PNG parts. Each image may be at most 10 MB, all images together may be at most 20 MB, and each decoded image may be at most 10,000 by 10,000 and 16 million pixels.
 
 For example, a bot can upload an image through the same participant-authorised endpoint:
 
@@ -75,6 +75,7 @@ curl --fail-with-body \
   -F body='Optional caption' \
   -F client_id="bot-$(date +%s)" \
   -F image=@./photo.png \
+  -F image=@./second-photo.jpg \
   "$KMAINSTAY_URL/api/conversations/$CONVERSATION_ID/messages"
 ```
 

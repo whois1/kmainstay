@@ -1004,25 +1004,26 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if (strings.TrimSpace(in.Body) == "" && in.Attachment == nil) || len(in.Body) > 20000 || len(in.ClientID) > 200 {
+	if (strings.TrimSpace(in.Body) == "" && len(in.Attachments) == 0) || len(in.Body) > 20000 || len(in.ClientID) > 200 {
 		writeError(w, 400, "invalid message")
 		return
 	}
-	if in.Attachment != nil {
+	if len(in.Attachments) > 0 {
 		if s.attachments == nil {
 			returnServerError(w)
 			return
 		}
-		if err := s.attachments.Save(in.Attachment.StorageKey, bytes.NewReader(in.Attachment.Bytes)); err != nil {
-			returnServerError(w)
-			return
+		for index, pending := range in.Attachments {
+			if err := s.attachments.Save(pending.StorageKey, bytes.NewReader(pending.Bytes)); err != nil {
+				deletePendingAttachments(s.attachments, in.Attachments[:index])
+				returnServerError(w)
+				return
+			}
 		}
 	}
-	m, created, err := s.insertMessageWithAttachment(r.Context(), conversationID, p, in.Body, in.ClientID, in.ReplyToMessageID, in.Attachment)
+	m, created, err := s.insertMessageWithAttachments(r.Context(), conversationID, p, in.Body, in.ClientID, in.ReplyToMessageID, in.Attachments)
 	if err != nil {
-		if in.Attachment != nil {
-			_ = s.attachments.Delete(in.Attachment.StorageKey)
-		}
+		deletePendingAttachments(s.attachments, in.Attachments)
 		if errors.Is(err, errMessageAccessDenied) {
 			writeError(w, http.StatusForbidden, "access denied")
 			return
@@ -1038,8 +1039,8 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 		returnServerError(w)
 		return
 	}
-	if !created && in.Attachment != nil {
-		_ = s.attachments.Delete(in.Attachment.StorageKey)
+	if !created {
+		deletePendingAttachments(s.attachments, in.Attachments)
 	}
 	if created {
 		s.hub.publish(m.Sequence)
@@ -1049,6 +1050,15 @@ func (s *server) postMessage(w http.ResponseWriter, r *http.Request) {
 		status = 201
 	}
 	writeJSON(w, status, m)
+}
+
+func deletePendingAttachments(store attachments.Store, pendingAttachments []*pendingAttachment) {
+	if store == nil {
+		return
+	}
+	for _, pending := range pendingAttachments {
+		_ = store.Delete(pending.StorageKey)
+	}
 }
 
 func (s *server) putConversationRead(w http.ResponseWriter, r *http.Request) {
@@ -1106,10 +1116,10 @@ var (
 )
 
 func (s *server) insertMessage(ctx context.Context, conversationID string, p principal, body, clientID string) (message, bool, error) {
-	return s.insertMessageWithAttachment(ctx, conversationID, p, body, clientID, "", nil)
+	return s.insertMessageWithAttachments(ctx, conversationID, p, body, clientID, "", nil)
 }
 
-func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID string, p principal, body, clientID, replyToMessageID string, pending *pendingAttachment) (message, bool, error) {
+func (s *server) insertMessageWithAttachments(ctx context.Context, conversationID string, p principal, body, clientID, replyToMessageID string, pendingAttachments []*pendingAttachment) (message, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return message{}, false, err
@@ -1266,13 +1276,13 @@ func (s *server) insertMessageWithAttachment(ctx context.Context, conversationID
 		return message{}, false, err
 	}
 	m.Sequence, _ = res.LastInsertId()
-	if pending != nil {
+	for position, pending := range pendingAttachments {
 		pending.MessageID = m.ID
 		pending.CreatedAt = m.CreatedAt
-		if _, err = tx.ExecContext(ctx, `INSERT INTO attachments(id,message_id,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, pending.ID, pending.MessageID, pending.StorageKey, pending.MediaType, pending.ByteSize, pending.Width, pending.Height, pending.OriginalFilename, pending.SHA256, pending.CreatedAt); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO attachments(id,message_id,position,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, pending.ID, pending.MessageID, position, pending.StorageKey, pending.MediaType, pending.ByteSize, pending.Width, pending.Height, pending.OriginalFilename, pending.SHA256, pending.CreatedAt); err != nil {
 			return message{}, false, err
 		}
-		m.Attachments = []attachment{pending.attachment}
+		m.Attachments = append(m.Attachments, pending.attachment)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_read_positions(user_id,conversation_id,sequence,updated_at)
 		VALUES(?,?,?,?)

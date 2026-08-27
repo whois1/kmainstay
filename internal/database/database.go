@@ -43,6 +43,9 @@ var messageRepliesMigration string
 //go:embed migrations/009_conversation_archives.sql
 var conversationArchivesMigration string
 
+//go:embed migrations/010_attachment_positions.sql
+var attachmentPositionsMigration string
+
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -192,6 +195,17 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 9: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(9,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=10`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(attachmentPositionsMigration); err != nil {
+			return fmt.Errorf("migration 10: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(10,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}

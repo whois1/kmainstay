@@ -91,7 +91,7 @@ Organisation administration deliberately uses only two membership roles. The boo
 - Bot-authored events are not delivered to other bots.
 - The bot runtime decides whether to respond to ordinary messages or mentions.
 - Messages accept bounded Markdown source text.
-- A message may include one JPEG or PNG up to 10 MB; an image-only message may have an empty body.
+- A message may include up to ten JPEG or PNG images, each up to 10 MB and together up to 20 MB; an image-only message may have an empty body.
 - Uploads are signature-checked, fully decoded under bounded concurrency, and dimension-bounded. Filenames are display metadata only and never become storage paths.
 - History and WebSocket events contain attachment metadata and an authorised content URL, never image bytes or Base64.
 - Client-generated idempotency identifiers prevent duplicate sends on retry.
