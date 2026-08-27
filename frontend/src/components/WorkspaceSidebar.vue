@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Conversation, Organisation, Principal, User } from '../types'
 
 const props = defineProps<{
@@ -9,6 +9,8 @@ const props = defineProps<{
   users: User[]
   selected: Conversation | null
   settingsActive: boolean
+  busy?: boolean
+  completedArchiveConversationIDs?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -18,6 +20,8 @@ const emit = defineEmits<{
   newTopic: [conversation: Conversation]
   selectDirectUser: [user: User]
   selectConversation: [conversation: Conversation]
+  archiveConversations: [conversations: Conversation[]]
+  deleteConversations: [conversations: Conversation[]]
 }>()
 
 function byLatestActivity(left: Conversation, right: Conversation) {
@@ -35,6 +39,8 @@ const pinnedConversations = computed(() => activeConversations.value.filter(conv
 const directConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 2).sort(byLatestActivity))
 const groupConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && (conversation.member_ids?.length ?? 0) > 2).sort(byLatestActivity))
 const removedDirectConversations = computed(() => activeConversations.value.filter(conversation => conversation.visibility === 'members' && conversation.member_ids?.length === 1 && conversation.member_ids[0] === props.principal?.id).sort(byLatestActivity))
+const selectedConversationIDs = ref(new Set<string>())
+let selectionAnchorID = ''
 
 const directContacts = computed(() => {
   const contacts = props.users
@@ -71,6 +77,57 @@ function openLatestDirectTopic(user: User, topics: Conversation[]) {
   if (topics[0]) emit('selectConversation', topics[0])
   else emit('selectDirectUser', user)
 }
+
+const selectableConversations = computed(() => [
+  ...pinnedConversations.value,
+  ...directContacts.value.flatMap(contact => contact.topics),
+  ...removedDirectConversations.value,
+  ...groupConversations.value,
+  ...archivedConversations.value,
+])
+
+function selectConversationCheckbox(event: MouseEvent, conversation: Conversation) {
+  const checkbox = event.currentTarget as HTMLInputElement
+  const nextSelection = new Set(selectedConversationIDs.value)
+  if (event.shiftKey && selectionAnchorID) {
+    const anchorIndex = selectableConversations.value.findIndex(({ id }) => id === selectionAnchorID)
+    const selectedIndex = selectableConversations.value.findIndex(({ id }) => id === conversation.id)
+    if (anchorIndex >= 0 && selectedIndex >= 0) {
+      const [start, end] = [anchorIndex, selectedIndex].sort((left, right) => left - right)
+      for (const selectedConversation of selectableConversations.value.slice(start, end + 1)) nextSelection.add(selectedConversation.id)
+    }
+  } else if (checkbox.checked) nextSelection.add(conversation.id)
+  else nextSelection.delete(conversation.id)
+  selectedConversationIDs.value = nextSelection
+  selectionAnchorID = conversation.id
+}
+
+function archiveSelectedConversations() {
+  const selectedActiveConversations = selectableConversations.value.filter(conversation => !conversation.archived && selectedConversationIDs.value.has(conversation.id))
+  if (!selectedActiveConversations.length) return
+  emit('archiveConversations', selectedActiveConversations)
+}
+
+function deleteSelectedConversations() {
+  const selectedConversations = selectableConversations.value.filter(conversation => selectedConversationIDs.value.has(conversation.id))
+  if (!selectedConversations.length) return
+  emit('deleteConversations', selectedConversations)
+}
+
+watch(() => props.conversations.map(conversation => conversation.id), conversationIDs => {
+  const availableConversationIDs = new Set(conversationIDs)
+  const remainingSelection = new Set([...selectedConversationIDs.value].filter(conversationID => availableConversationIDs.has(conversationID)))
+  if (remainingSelection.size !== selectedConversationIDs.value.size) selectedConversationIDs.value = remainingSelection
+  if (selectionAnchorID && !availableConversationIDs.has(selectionAnchorID)) selectionAnchorID = ''
+})
+
+watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
+  if (!completedConversationIDs?.length) return
+  const remainingSelection = new Set(selectedConversationIDs.value)
+  for (const conversationID of completedConversationIDs) remainingSelection.delete(conversationID)
+  selectedConversationIDs.value = remainingSelection
+  if (selectionAnchorID && completedConversationIDs.includes(selectionAnchorID)) selectionAnchorID = ''
+})
 </script>
 
 <template>
@@ -86,9 +143,12 @@ function openLatestDirectTopic(user: User, topics: Conversation[]) {
     <nav class="sidebar-navigation" aria-label="Conversations">
       <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
         <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
-        <button v-for="conversation in pinnedConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
-        </button>
+        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation">
+          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+          <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+            <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+          </button>
+        </div>
       </section>
       <section data-testid="direct-conversations" aria-labelledby="direct-heading">
         <h2 id="direct-heading" class="sidebar-section-heading" aria-label="Direct messages"><span aria-hidden="true">●</span><span>Direct messages</span></h2>
@@ -100,17 +160,24 @@ function openLatestDirectTopic(user: User, topics: Conversation[]) {
             </button>
             <button :data-testid="`new-direct-topic-${contact.user.id}`" class="topic-add" :aria-label="`New chat with ${contact.user.name}`" :title="`New chat with ${contact.user.name}`" @click="$emit('newDirectTopic', contact.user)">＋</button>
           </div>
-          <button v-for="conversation in contact.topics" :key="conversation.id" class="direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-            <span class="topic-branch" aria-hidden="true">↳</span><span class="conversation-label">{{ directTopicName(conversation) }}</span>
+          <div v-for="conversation in contact.topics" :key="conversation.id" class="selectable-conversation">
+            <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${directTopicName(conversation)} with ${contact.user.name}`" @click="selectConversationCheckbox($event, conversation)">
+            <button class="direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+              <span class="topic-branch" aria-hidden="true">↳</span><span class="conversation-label">{{ directTopicName(conversation) }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-for="conversation in removedDirectConversations" :key="conversation.id" class="selectable-conversation">
+          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" aria-label="Select conversation with Removed user" @click="selectConversationCheckbox($event, conversation)">
+          <button class="direct-topic removed-direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+            <span class="direct-avatar" aria-hidden="true">?</span><span class="conversation-label">Removed user</span>
           </button>
         </div>
-        <button v-for="conversation in removedDirectConversations" :key="conversation.id" class="direct-topic removed-direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-          <span class="direct-avatar" aria-hidden="true">?</span><span class="conversation-label">Removed user</span>
-        </button>
       </section>
       <section data-testid="group-conversations" aria-labelledby="group-heading">
         <h2 id="group-heading" class="sidebar-section-heading" aria-label="Group chats"><span aria-hidden="true">◇</span><span>Group chats</span></h2>
-        <div v-for="conversation in groupConversations" :key="conversation.id" class="conversation-row">
+        <div v-for="conversation in groupConversations" :key="conversation.id" class="conversation-row selectable-conversation">
+          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button class="conversation-main" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>
@@ -119,11 +186,19 @@ function openLatestDirectTopic(user: User, topics: Conversation[]) {
       </section>
       <section v-if="archivedConversations.length" data-testid="archived-conversations" aria-labelledby="archived-heading">
         <h2 id="archived-heading" class="sidebar-section-heading"><span aria-hidden="true">▣</span><span>Archived</span></h2>
-        <button v-for="conversation in archivedConversations" :key="conversation.id" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-          <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
-        </button>
+        <div v-for="conversation in archivedConversations" :key="conversation.id" class="selectable-conversation">
+          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+          <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+            <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
+          </button>
+        </div>
       </section>
     </nav>
+    <div v-if="selectedConversationIDs.size" data-testid="bulk-conversation-actions" class="bulk-conversation-actions" aria-live="polite">
+      <span>{{ selectedConversationIDs.size }} selected</span>
+      <button data-testid="bulk-archive-conversations" :disabled="busy" @click="archiveSelectedConversations">Archive</button>
+      <button v-if="organisation?.role === 'admin'" data-testid="bulk-delete-conversations" class="danger-outline" :disabled="busy" @click="deleteSelectedConversations">Delete</button>
+    </div>
     <div class="profile"><span>{{ principal.name.slice(0, 1) }}</span><div><strong>{{ principal.name }}</strong><small>Human</small></div></div>
   </aside>
 </template>

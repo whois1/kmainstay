@@ -100,11 +100,74 @@ describe('WorkspaceSidebar', () => {
       },
     })
 
-    const directButton = wrapper.get('[data-testid=direct-contact-hector] .direct-topic:last-child')
+    const directButton = wrapper.get('[data-testid=direct-contact-hector] .selectable-conversation:last-child .direct-topic')
     expect(directButton.attributes('aria-current')).toBe('page')
     expect(wrapper.findAll('[data-testid=direct-contact-hector] [aria-current="page"]')).toHaveLength(1)
     await wrapper.setProps({ settingsActive: true })
     expect(directButton.attributes('aria-current')).toBeUndefined()
+  })
+
+  it('selects a contiguous conversation range with Shift-click', async () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    expect(checkboxes).toHaveLength(conversations.length)
+    await checkboxes[0].trigger('click')
+    await checkboxes[2].trigger('click', { shiftKey: true })
+
+    expect(checkboxes.map(checkbox => (checkbox.element as HTMLInputElement).checked)).toEqual([
+      true, true, true, false, false, false, false,
+    ])
+    const actionBar = wrapper.get('[data-testid=bulk-conversation-actions]')
+    expect(actionBar.text()).toContain('3 selected')
+    expect(actionBar.attributes('aria-live')).toBe('polite')
+  })
+
+  it('identifies the direct contact in checkbox names', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    expect(wrapper.findAll('[data-testid=direct-contact-hector] [data-testid=conversation-checkbox]').map(checkbox => checkbox.attributes('aria-label'))).toEqual([
+      'Select K-Mainstay code with Hector',
+      'Select General with Hector',
+    ])
+  })
+
+  it('emits the selected active conversations for bulk archive', async () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    await checkboxes[0].trigger('click')
+    await checkboxes[1].trigger('click')
+    await wrapper.get('[data-testid=bulk-archive-conversations]').trigger('click')
+
+    expect(wrapper.emitted('archiveConversations')?.[0]).toEqual([[conversations[1], conversations[0]]])
   })
 
   it('keeps a user-created direct-prefixed topic name', () => {

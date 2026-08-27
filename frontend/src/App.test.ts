@@ -55,6 +55,16 @@ describe('K-Mainstay UI', () => {
     expect(styles).toContain('  .composer-actions { justify-content: flex-end; }')
   })
 
+  it('keeps bulk conversation actions visible outside the scrolling navigation', () => {
+    const rule = cssRule('.bulk-conversation-actions')
+    expect(rule).toContain('display: grid')
+    expect(rule).toContain('grid-template-columns: 1fr auto auto')
+    expect(rule).toContain('border-top: 1px solid var(--border)')
+    expect(styles).toContain('  .conversation-row.selectable-conversation { grid-template-columns: 24px minmax(0, 1fr); }')
+    expect(styles).toContain('  .bulk-conversation-actions { grid-template-columns: 1fr; text-align: center; }')
+    expect(styles).toContain('  .selectable-conversation > button, .sidebar-navigation section > button, .direct-contact-button, .direct-topic, .conversation-main { display: grid;')
+  })
+
   it('constrains long conversation labels to the sidebar before applying an ellipsis', () => {
     expect(cssRule('.sidebar-navigation section')).toContain('min-width: 0')
     expect(cssRule('.direct-contact')).toContain('min-width: 0')
@@ -177,6 +187,73 @@ describe('K-Mainstay UI', () => {
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/archive', expect.objectContaining({ method: 'PUT' }))
     expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('general')
+  })
+
+  it('archives selected conversations in bulk', async () => {
+    const archivedConversationIDs = new Set<string>()
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', archived: archivedConversationIDs.has('c1') },
+        { id: 'c2', name: 'planning', visibility: 'organisation', archived: archivedConversationIDs.has('c2') },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      const archiveMatch = url.match(/^\/api\/conversations\/(c[12])\/archive$/)
+      if (archiveMatch && init?.method === 'PUT') {
+        archivedConversationIDs.add(archiveMatch[1])
+        return Promise.resolve(new Response(null, { status: 204 }))
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    await checkboxes[0].trigger('click')
+    await checkboxes[1].trigger('click')
+    await wrapper.get('[data-testid=bulk-archive-conversations]').trigger('click')
+    await flushPromises()
+
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/archive', expect.objectContaining({ method: 'PUT' }))
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/c2/archive', expect.objectContaining({ method: 'PUT' }))
+    expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('general')
+    expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('planning')
+  })
+
+  it('keeps failed bulk archives selected for retry', async () => {
+    let firstConversationArchived = false
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation', archived: firstConversationArchived },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/archive' && init?.method === 'PUT') {
+        firstConversationArchived = true
+        return Promise.resolve(new Response(null, { status: 204 }))
+      }
+      if (url === '/api/conversations/c2/archive' && init?.method === 'PUT') return json({ error: 'Archive failed' }, 500)
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    await checkboxes[0].trigger('click')
+    await checkboxes[1].trigger('click')
+    await wrapper.get('[data-testid=bulk-archive-conversations]').trigger('click')
+    await flushPromises()
+
+    const checkedLabels = wrapper.findAll('[data-testid=conversation-checkbox]')
+      .filter(checkbox => (checkbox.element as HTMLInputElement).checked)
+      .map(checkbox => checkbox.attributes('aria-label'))
+    expect(checkedLabels).toEqual(['Select planning'])
+    expect(wrapper.get('[data-testid=bulk-conversation-actions]').text()).toContain('1 selected')
   })
 
   it('uses the fetched active state when message activity commits after an archive', async () => {
@@ -1329,6 +1406,65 @@ describe('K-Mainstay UI', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
     expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
     expect(wrapper.get('h1').text()).toBe('# planning')
+    confirm.mockRestore()
+  })
+
+  it('lets an admin delete selected conversations after one bulk confirmation', async () => {
+    const conversations = [
+      { id: 'c1', name: 'general', visibility: 'organisation' },
+      { id: 'c2', name: 'planning', visibility: 'organisation' },
+    ]
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json(conversations)
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (/^\/api\/organisations\/o1\/conversations\/c[12]$/.test(url) && init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    await checkboxes[0].trigger('click')
+    await checkboxes[1].trigger('click')
+    await wrapper.get('[data-testid=bulk-delete-conversations]').trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(confirm).toHaveBeenCalledWith('Delete 2 conversations? This permanently removes their messages for everyone.')
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
+    expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c2', expect.objectContaining({ method: 'DELETE' }))
+    expect(wrapper.text()).toContain('No conversations')
+    confirm.mockRestore()
+  })
+
+  it('keeps selected conversations ticked when bulk delete is cancelled', async () => {
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
+        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c2', name: 'planning', visibility: 'organisation' },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
+    await checkboxes[0].trigger('click')
+    await checkboxes[1].trigger('click')
+    await wrapper.get('[data-testid=bulk-delete-conversations]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid=bulk-conversation-actions]').text()).toContain('2 selected')
+    expect(checkboxes.every(checkbox => (checkbox.element as HTMLInputElement).checked)).toBe(true)
     confirm.mockRestore()
   })
 
