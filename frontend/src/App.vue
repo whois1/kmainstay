@@ -42,6 +42,7 @@ const removingBotID = ref('')
 const showConversation = ref(false)
 const creatingConversation = ref(false)
 const titleSavingConversationIDs = ref(new Set<string>())
+const completedArchiveConversationIDs = ref<string[]>([])
 let conversationCreationGeneration = 0
 const conversationName = ref('')
 const users = ref<User[]>([])
@@ -583,6 +584,22 @@ async function setSelectedConversationArchived(archived: boolean) {
   }
 }
 
+async function archiveConversationsInBulk(selectedConversations: Conversation[]) {
+  if (busy.value) return
+  const activeConversations = selectedConversations.filter(conversation => !conversation.archived && !conversation.id.startsWith('draft:'))
+  if (!activeConversations.length) return
+  busy.value = true
+  error.value = ''
+  const results = await Promise.allSettled(activeConversations.map(conversation =>
+    request<void>(`/api/conversations/${conversation.id}/archive`, jsonInit('PUT')),
+  ))
+  await refreshConversations()
+  completedArchiveConversationIDs.value = activeConversations.filter((_conversation, index) => results[index].status === 'fulfilled').map(conversation => conversation.id)
+  const failure = results.find(result => result.status === 'rejected')
+  if (failure?.status === 'rejected') error.value = messageOf(failure.reason)
+  busy.value = false
+}
+
 async function reconcileConversationArchiveState(conversationID: string) {
   if (!organisation.value) return
   const archiveStateGeneration = archiveStateGenerations.get(conversationID) ?? 0
@@ -614,6 +631,31 @@ async function deleteSelectedConversation() {
     await request<void>(`/api/organisations/${organisation.value.id}/conversations/${conversation.id}`, jsonInit('DELETE'))
     await handleConversationDeleted(conversation.id)
   } catch (cause) { error.value = messageOf(cause) } finally { busy.value = false }
+}
+
+async function deleteConversationsInBulk(selectedConversations: Conversation[]) {
+  if (!organisation.value || organisation.value.role !== 'admin' || busy.value || !selectedConversations.length) return
+  if (!window.confirm(`Delete ${selectedConversations.length} conversations? This permanently removes their messages for everyone.`)) return
+  busy.value = true
+  error.value = ''
+  const organisationID = organisation.value.id
+  const results = await Promise.allSettled(selectedConversations.map(conversation =>
+    request<void>(`/api/organisations/${organisationID}/conversations/${conversation.id}`, jsonInit('DELETE')),
+  ))
+  const deletedConversationIDs = new Set(selectedConversations.filter((_conversation, index) => results[index].status === 'fulfilled').map(conversation => conversation.id))
+  conversations.value = conversations.value.filter(conversation => !deletedConversationIDs.has(conversation.id))
+  if (selected.value && deletedConversationIDs.has(selected.value.id)) {
+    conversationSelectionGeneration++
+    selected.value = null
+    messages.value = []
+    const firstActive = conversations.value.find(conversation => !conversation.archived)
+    if (firstActive) {
+      try { await selectConversation(firstActive) } catch (cause) { error.value = messageOf(cause) }
+    }
+  }
+  const failure = results.find(result => result.status === 'rejected')
+  if (failure?.status === 'rejected') error.value = messageOf(failure.reason)
+  busy.value = false
 }
 
 async function handleConversationDeleted(conversationID: string) {
@@ -701,7 +743,7 @@ onBeforeUnmount(() => {
     </form>
   </main>
   <main v-else class="workspace">
-    <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" />
+    <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" :busy="busy" :completed-archive-conversation-i-ds="completedArchiveConversationIDs" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" @archive-conversations="archiveConversationsInBulk" @delete-conversations="deleteConversationsInBulk" />
     <ConversationView v-if="activeView === 'chat'" :composer="composer" :images="images" :activities="selectedActivities" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin'" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:images="updateImagesDraft" @update-title="updateConversationTitle" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
