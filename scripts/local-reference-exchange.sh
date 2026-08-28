@@ -8,6 +8,7 @@ server_pid=""; bot_pid=""
 cleanup() { [[ -z "$bot_pid" ]] || kill "$bot_pid" 2>/dev/null || true; [[ -z "$server_pid" ]] || kill "$server_pid" 2>/dev/null || true; rm -rf "$run_dir"; }
 trap cleanup EXIT
 cd "$repo_dir"
+npm run build
 go build -o "$run_dir/kmainstay" ./cmd/kmainstay
 go build -o "$run_dir/kmainstay-initialise" ./cmd/kmainstay-initialise
 printf '%s\n' 'correct horse battery staple' | DB_PATH="$run_dir/test.db" BOOTSTRAP_EMAIL=michael@example.com BOOTSTRAP_NAME=Michael BOOTSTRAP_ORGANISATION=Mainstay "$run_dir/kmainstay-initialise" >/dev/null
