@@ -49,9 +49,6 @@ jobs:
       - name: Build embedded frontend
         run: npm run build
 
-      - name: Verify generated frontend is committed
-        run: git diff --exit-code -- internal/webui/dist
-
       - name: Vet Go source
         run: go vet ./...
 

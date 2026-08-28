@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import WorkspaceSidebar from './WorkspaceSidebar.vue'
 import type { Conversation, User } from '../types'
+
+const styles = readFileSync('frontend/src/style.css', 'utf8')
 
 const conversations: Conversation[] = [
   { id: 'pinned-old', name: 'General', visibility: 'organisation', latest_sequence: 2 },
@@ -170,6 +173,24 @@ describe('WorkspaceSidebar', () => {
     expect(wrapper.emitted('archiveConversations')?.[0]).toEqual([[conversations[1], conversations[0]]])
   })
 
+  it('keeps conversation selectors compact beside their labels', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    expect(wrapper.get('[data-testid=conversation-checkbox]').classes()).toContain('conversation-selector')
+    expect(cssRule('.conversation-selector')).toContain('width: 16px')
+    expect(cssRule('.conversation-selector')).toContain('min-height: 16px')
+    expect(cssRule('.sidebar-navigation')).toContain('scrollbar-width: thin')
+  })
+
   it('keeps a user-created direct-prefixed topic name', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
@@ -204,3 +225,11 @@ describe('WorkspaceSidebar', () => {
     expect(wrapper.emitted('newDirectTopic')?.[0]).toEqual([users[1]])
   })
 })
+
+function cssRule(selector: string) {
+  const selectorStart = styles.indexOf(`\n${selector} {`)
+  expect(selectorStart, `Missing CSS rule for ${selector}`).toBeGreaterThanOrEqual(0)
+  const ruleStart = styles.indexOf('{', selectorStart)
+  const ruleEnd = styles.indexOf('}', ruleStart)
+  return styles.slice(ruleStart + 1, ruleEnd)
+}
