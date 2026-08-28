@@ -183,6 +183,14 @@ describe('ConversationView', () => {
     expect(wrapper.find('[role=alert]').exists()).toBe(false)
   })
 
+  it('highlights recognised mentions in the composer', () => {
+    const unicodeUser: User = { id: 'tane', name: 'Tāne 测试', kind: 'human', role: 'member' }
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: 'Ask @Hector, @hEcToR, @Ta\u0304ne 测试, Ⅻ@Hector, @Hector², and @Mary Jane, not @Nobody or email@Hector', busy: false, error: '', canDelete: false, users: [...users, unicodeUser], currentUserID: 'reader' } })
+
+    expect(wrapper.findAll('[data-testid=composer-mention]').map(mention => mention.text())).toEqual(['@Hector', '@hEcToR', '@Ta\u0304ne 测试', '@Hector', '@Hector', '@Mary Jane'])
+    expect(wrapper.get('[data-testid=composer-highlights]').text()).toBe('Ask @Hector, @hEcToR, @Ta\u0304ne 测试, Ⅻ@Hector, @Hector², and @Mary Jane, not @Nobody or email@Hector')
+  })
+
   it('filters mention suggestions and provides accessible keyboard selection', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false, users, currentUserID: 'reader' } })
     const textarea = wrapper.get('textarea')
