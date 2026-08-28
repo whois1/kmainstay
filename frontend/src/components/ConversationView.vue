@@ -10,6 +10,7 @@ const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const showJumpToBottom = ref(false)
 const textarea = ref<HTMLTextAreaElement | null>(null)
+const composerHighlights = ref<HTMLElement | null>(null)
 const draft = ref(props.composer)
 const mentionStart = ref<number | null>(null)
 const mentionQuery = ref('')
@@ -24,6 +25,34 @@ const isDraft = computed(() => props.selected?.id.startsWith('draft:') ?? false)
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
 const activeOptionID = computed(() => pickerVisible.value ? `mention-option-${suggestions.value[activeSuggestion.value]?.id}` : undefined)
+const composerSegments = computed(() => {
+  const names = [...new Set((props.users ?? []).map(user => user.name.normalize('NFC')))].sort((a, b) => Array.from(b).length - Array.from(a).length)
+  if (!names.length) return [{ text: draft.value, mention: false }]
+  const escapedNames = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const mentionPattern = new RegExp(`(?<![\\p{L}\\p{Nd}\\p{M}_])@(?:${escapedNames.join('|')})(?![\\p{L}\\p{Nd}\\p{M}_])`, 'giu')
+  const originalOffsets = new Map<number, number>([[0, 0]])
+  const normalisedParts: string[] = []
+  let normalisedOffset = 0
+  for (const { segment, index } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(draft.value)) {
+    const normalisedSegment = segment.normalize('NFC')
+    normalisedParts.push(normalisedSegment)
+    normalisedOffset += normalisedSegment.length
+    originalOffsets.set(normalisedOffset, index + segment.length)
+  }
+  const normalisedDraft = normalisedParts.join('')
+  const segments: { text: string; mention: boolean }[] = []
+  let start = 0
+  for (const match of normalisedDraft.matchAll(mentionPattern)) {
+    const originalStart = originalOffsets.get(match.index)
+    const originalEnd = originalOffsets.get(match.index + match[0].length)
+    if (originalStart === undefined || originalEnd === undefined) continue
+    if (originalStart > start) segments.push({ text: draft.value.slice(start, originalStart), mention: false })
+    segments.push({ text: draft.value.slice(originalStart, originalEnd), mention: true })
+    start = originalEnd
+  }
+  if (start < draft.value.length) segments.push({ text: draft.value.slice(start), mention: false })
+  return segments
+})
 const directUser = computed(() => {
   if (props.selected?.visibility !== 'members' || props.selected.member_ids?.length !== 2) return null
   const otherUserID = props.selected.member_ids.find(id => id !== props.currentUserID)
@@ -157,6 +186,12 @@ function updateComposer(event: Event) {
   draft.value = element.value
   emit('update:composer', element.value)
   updateMentionPicker(element)
+}
+
+function syncComposerScroll() {
+  if (!textarea.value || !composerHighlights.value) return
+  composerHighlights.value.scrollTop = textarea.value.scrollTop
+  composerHighlights.value.scrollLeft = textarea.value.scrollLeft
 }
 
 function updateMentionPicker(element: HTMLTextAreaElement) {
@@ -320,7 +355,7 @@ function handleScroll() {
     <form v-if="selected" data-testid="composer" class="composer" @submit.prevent="$emit('sendMessage')" @dragover="allowImageDrop" @drop="dropImage">
       <div v-if="activities?.length" class="agent-activity" data-testid="agent-activity" role="status" aria-live="polite" aria-atomic="true"><span class="activity-dot" aria-hidden="true"></span>{{ activityText }}</div>
       <div v-if="replyingTo" data-testid="reply-preview" class="reply-preview"><div><strong>Replying to {{ replyingTo.author_name }}</strong><span>{{ replyingTo.body }}</span></div><button type="button" aria-label="Cancel reply" @click="$emit('cancelReply')">×</button></div>
-      <div class="composer-input"><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation || selected.archived" :placeholder="selected.archived ? 'Restore this conversation to reply' : removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" @paste="pasteImage" />
+      <div class="composer-input"><div ref="composerHighlights" data-testid="composer-highlights" class="composer-highlights" aria-hidden="true"><template v-for="(segment, index) in composerSegments" :key="index"><span v-if="segment.mention" data-testid="composer-mention" class="composer-mention">{{ segment.text }}</span><span v-else>{{ segment.text }}</span></template></div><textarea ref="textarea" :value="draft" :disabled="removedDirectConversation || selected.archived" :placeholder="selected.archived ? 'Restore this conversation to reply' : removedDirectConversation ? 'Conversation unavailable' : directUser ? `Message ${conversationDisplayName}` : `Message #${conversationDisplayName}`" rows="1" role="combobox" aria-label="Message" aria-autocomplete="list" aria-haspopup="listbox" :aria-expanded="pickerVisible" :aria-controls="pickerVisible ? 'mention-suggestions' : undefined" :aria-activedescendant="activeOptionID" @input="updateComposer" @click="updateMentionPicker($event.target as HTMLTextAreaElement)" @keydown="handleComposerKeydown" @paste="pasteImage" @scroll="syncComposerScroll" />
         <ul v-if="pickerVisible" id="mention-suggestions" class="mention-picker" role="listbox" aria-label="Mention a person or bot">
           <li v-for="(user, index) in suggestions" :id="`mention-option-${user.id}`" :key="user.id" role="option" :aria-selected="index === activeSuggestion" @mousedown.prevent @click="selectMention(user)"><span>{{ user.name }}</span><small>{{ user.kind }}</small></li>
         </ul>
