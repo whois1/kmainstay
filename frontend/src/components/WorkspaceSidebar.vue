@@ -144,7 +144,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
       <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
         <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
         <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation">
-          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>
@@ -161,14 +161,14 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
             <button :data-testid="`new-direct-topic-${contact.user.id}`" class="topic-add" :aria-label="`New chat with ${contact.user.name}`" :title="`New chat with ${contact.user.name}`" @click="$emit('newDirectTopic', contact.user)">＋</button>
           </div>
           <div v-for="conversation in contact.topics" :key="conversation.id" class="selectable-conversation">
-            <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${directTopicName(conversation)} with ${contact.user.name}`" @click="selectConversationCheckbox($event, conversation)">
+            <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${directTopicName(conversation)} with ${contact.user.name}`" @click="selectConversationCheckbox($event, conversation)">
             <button class="direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
               <span class="topic-branch" aria-hidden="true">↳</span><span class="conversation-label">{{ directTopicName(conversation) }}</span>
             </button>
           </div>
         </div>
         <div v-for="conversation in removedDirectConversations" :key="conversation.id" class="selectable-conversation">
-          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" aria-label="Select conversation with Removed user" @click="selectConversationCheckbox($event, conversation)">
+          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" aria-label="Select conversation with Removed user" @click="selectConversationCheckbox($event, conversation)">
           <button class="direct-topic removed-direct-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="direct-avatar" aria-hidden="true">?</span><span class="conversation-label">Removed user</span>
           </button>
@@ -177,7 +177,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
       <section data-testid="group-conversations" aria-labelledby="group-heading">
         <h2 id="group-heading" class="sidebar-section-heading" aria-label="Group chats"><span aria-hidden="true">◇</span><span>Group chats</span></h2>
         <div v-for="conversation in groupConversations" :key="conversation.id" class="conversation-row selectable-conversation">
-          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button class="conversation-main" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>
@@ -187,7 +187,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
       <section v-if="archivedConversations.length" data-testid="archived-conversations" aria-labelledby="archived-heading">
         <h2 id="archived-heading" class="sidebar-section-heading"><span aria-hidden="true">▣</span><span>Archived</span></h2>
         <div v-for="conversation in archivedConversations" :key="conversation.id" class="selectable-conversation">
-          <input data-testid="conversation-checkbox" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>
