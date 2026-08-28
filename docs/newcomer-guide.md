@@ -199,6 +199,12 @@ There is one application process. Do not horizontally scale this SQLite design. 
 
 ## Validation
 
+Build the embedded frontend before running Go commands in a fresh checkout:
+
+```sh
+npm run build
+```
+
 Backend gates:
 
 ```sh

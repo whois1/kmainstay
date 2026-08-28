@@ -32,6 +32,7 @@ Prefer real collaborators and externally visible results. Use mocks only where a
 
 ## Verification
 
+- Run `npm run build` before any Go command in a fresh checkout. The Go server deliberately fails to compile when its embedded frontend is missing.
 - During RED and GREEN, report the specific test command and its observed result.
 - Before completion, run `npm test`, `npm run typecheck`, and `npm run build` for frontend or JavaScript changes.
 - Before completion, run `go test -race ./...` and `go vet ./...` for Go changes.

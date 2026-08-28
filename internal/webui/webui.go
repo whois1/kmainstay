@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed *
+//go:embed dist
 var files embed.FS
 
 func Handler() http.Handler {
