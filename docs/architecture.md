@@ -95,6 +95,8 @@ Organisation administration deliberately uses only two membership roles. The boo
 - Uploads are signature-checked, fully decoded under bounded concurrency, and dimension-bounded. Filenames are display metadata only and never become storage paths.
 - History and WebSocket events contain attachment metadata and an authorised content URL, never image bytes or Base64.
 - Client-generated idempotency identifiers prevent duplicate sends on retry.
+- An author may transactionally replace only their message body/caption. The update preserves creation identity and routing, recomputes display mentions, and records nullable `edited_at`.
+- Message edits do not mutate bot deliveries, reads, latest-message/activity ordering, archives, or automatic titles.
 
 ## Attachment storage
 
@@ -106,7 +108,13 @@ Deleting a conversation cascades attachment metadata and then removes its object
 
 ## Realtime events
 
-A versioned envelope uses `message.created` for durable message delivery:
+A versioned envelope uses `message.created` for creation and `message.updated` for human-client replacement. Both are durable. Creation rows remain alone in `realtime_events` so a rolled-back binary cannot mistake an update for a creation. Update rows live in `message_update_events`; current servers allocate from a shared SQLite integer sequence before inserting either kind of event, ordering both tables in one gapless replay cursor. The update envelope receives a new replay sequence while its payload retains the original creation sequence.
+
+Migration 11 is deliberately fail-closed across rollback: its `realtime_events` trigger rejects inserts without an explicit sequence with a current-binary schema error. A rolled-back binary therefore cannot receive a stale `LastInsertId` or write a creation event whose response and read cursor refer to a different sequence.
+
+Bots are excluded from update replay. Each creation row also stores the completed creation payload so delayed bot replay preserves the body, mentions, attachments, and reply preview as they existed at creation. Human history and update envelopes render current message state.
+
+Creation example:
 
 ```json
 {

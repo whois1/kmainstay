@@ -11,7 +11,7 @@ export interface Attachment {
 }
 export interface Message {
   id: string; conversation_id: string; author_id: string; author_name: string
-  author_kind: 'human' | 'bot'; body: string; client_id?: string; created_at: string; sequence: number; mentions?: MentionedUser[]; attachments?: Attachment[]; reply_to?: MessageReply
+  author_kind: 'human' | 'bot'; body: string; client_id?: string; created_at: string; edited_at?: string | null; sequence: number; mentions?: MentionedUser[]; attachments?: Attachment[]; reply_to?: MessageReply
 }
 export interface User { id: string; kind: 'human' | 'bot'; name: string; role: OrganisationRole }
 export interface EligibleUser { id: string; name: string; email: string }

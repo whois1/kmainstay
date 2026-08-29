@@ -4,7 +4,7 @@ import { renderMarkdown } from '../markdown'
 import type { Conversation, ConversationActivity, Message, User } from '../types'
 
 const props = defineProps<{ selected: Conversation | null; messages: Message[]; composer: string; images?: File[]; activities?: ConversationActivity[]; busy: boolean; titleBusy?: boolean; error: string; canDelete: boolean; users?: User[]; currentUserID?: string; hasNewerMessages?: boolean; jumpToLatestVersion?: number; replyingTo?: Message | null }>()
-const emit = defineEmits<{ deleteConversation: []; archiveConversation: []; restoreConversation: []; newTopic: []; updateTitle: [name: string]; replyTo: [message: Message]; cancelReply: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:images': [value: File[]] }>()
+const emit = defineEmits<{ deleteConversation: []; archiveConversation: []; restoreConversation: []; newTopic: []; updateTitle: [name: string]; editMessage: [messageID: string, body: string]; replyTo: [message: Message]; cancelReply: []; sendMessage: []; readThrough: [sequence: number]; jumpToLatest: []; 'update:composer': [value: string]; 'update:images': [value: File[]] }>()
 
 const firstUnreadMessageID = ref<string | null>(null)
 const messageList = ref<HTMLElement | null>(null)
@@ -21,6 +21,9 @@ const imageError = ref('')
 const previewURLs = ref<string[]>([])
 const editingTitle = ref(false)
 const titleDraft = ref('')
+const editingMessageID = ref<string | null>(null)
+const messageEditDraft = ref('')
+const editingMessageVersion = ref<string | null | undefined>(undefined)
 const isDraft = computed(() => props.selected?.id.startsWith('draft:') ?? false)
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
@@ -96,10 +99,30 @@ watch(() => props.selected?.id, async () => {
   closeMentionPicker()
   imageError.value = ''
   editingTitle.value = false
+  editingMessageID.value = null
   clearImages()
   await nextTick()
   if (isDraft.value) textarea.value?.focus()
 })
+
+watch(() => props.messages, messages => {
+  if (!editingMessageID.value) return
+  const message = messages.find(message => message.id === editingMessageID.value)
+  if (message && (message.body === messageEditDraft.value || message.edited_at !== editingMessageVersion.value)) editingMessageID.value = null
+}, { deep: true })
+
+function beginMessageEdit(message: Message) {
+  editingMessageID.value = message.id
+  messageEditDraft.value = message.body
+  editingMessageVersion.value = message.edited_at
+}
+
+function submitMessageEdit() {
+  if (!editingMessageID.value || messageEditDraft.value.length > 20000) return
+  const message = props.messages.find(({ id }) => id === editingMessageID.value)
+  if (!message || (!messageEditDraft.value.trim() && !(message.attachments?.length))) return
+  emit('editMessage', editingMessageID.value, messageEditDraft.value)
+}
 
 function beginTitleEdit() {
   titleDraft.value = conversationDisplayName.value
@@ -346,7 +369,7 @@ function handleScroll() {
         <div v-if="message.id === firstUnreadMessageID" data-testid="new-messages-divider" class="new-messages-divider" role="separator" aria-label="New messages"><span>New messages</span></div>
         <article data-testid="message" :data-message-id="message.id">
           <div class="avatar" :class="{ bot: message.author_kind === 'bot' }">{{ message.author_name.slice(0, 1) }}</div>
-          <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time><button data-testid="reply-message" class="message-reply-action" type="button" @click="$emit('replyTo', message)">Reply</button></div><div v-if="message.reply_to" data-testid="message-reply" class="message-reply"><strong>{{ message.reply_to.author_name }}</strong><span>{{ message.reply_to.body }}</span></div><div v-for="attachment in message.attachments ?? []" :key="attachment.id" class="message-image-frame"><img data-testid="message-image" class="message-image" :src="attachment.content_url" :alt="attachment.original_filename" loading="lazy" :width="attachment.width" :height="attachment.height" /></div><div v-if="message.body.trim()" class="markdown" v-html="renderMarkdown(message.body, message.mentions)" /></div>
+          <div><div class="message-meta"><strong>{{ message.author_name }}</strong><span v-if="message.author_kind === 'bot'" class="bot-badge">BOT</span><time>{{ new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time><span v-if="message.edited_at" class="edited-label">Edited</span><button data-testid="reply-message" class="message-reply-action" type="button" @click="$emit('replyTo', message)">Reply</button><button v-if="message.author_id === currentUserID" data-testid="edit-message" class="message-reply-action" type="button" @click="beginMessageEdit(message)">Edit</button></div><div v-if="message.reply_to" data-testid="message-reply" class="message-reply"><strong>{{ message.reply_to.author_name }}</strong><span>{{ message.reply_to.body }}</span></div><div v-for="attachment in message.attachments ?? []" :key="attachment.id" class="message-image-frame"><img data-testid="message-image" class="message-image" :src="attachment.content_url" :alt="attachment.original_filename" loading="lazy" :width="attachment.width" :height="attachment.height" /></div><form v-if="editingMessageID === message.id" data-testid="message-edit-form" class="message-edit-form" @submit.prevent="submitMessageEdit"><textarea data-testid="message-edit-textarea" v-model="messageEditDraft" aria-label="Edit message" maxlength="20000" rows="3" /><div><button type="submit" :disabled="busy || (!messageEditDraft.trim() && !(message.attachments?.length))">Save</button><button data-testid="cancel-message-edit" class="secondary" type="button" @click="editingMessageID = null">Cancel</button></div></form><div v-else-if="message.body.trim()" class="markdown" v-html="renderMarkdown(message.body, message.mentions)" /></div>
         </article>
         </template>
       </div>
