@@ -210,31 +210,44 @@ func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
 	defer server.Close()
 	client := newCookieClient(t)
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "reader@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
-	archiveEndpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/archive"
+	var bot, conversation map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Planning", "visibility": "members", "member_ids": []string{bot["id"].(string)}}), http.StatusCreated, &conversation)
+	conversationID := conversation["id"].(string)
+	archiveEndpoint := server.URL + "/api/conversations/" + conversationID + "/archive"
 	conversationEndpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
 
 	decodeResponse(t, requestJSON(t, client, http.MethodPut, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
 	var active []map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
-	if len(active) != 0 {
+	if len(active) != 1 || active[0]["id"] != boot.ConversationID {
 		t.Fatalf("active conversations = %#v", active)
 	}
 	var all []map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint+"?include_archived=true", server.URL, "", nil), http.StatusOK, &all)
-	if len(all) != 1 || all[0]["archived"] != true {
+	if len(all) != 2 {
 		t.Fatalf("all conversations = %#v", all)
+	}
+	var archived bool
+	for _, item := range all {
+		if item["id"] == conversationID {
+			archived, _ = item["archived"].(bool)
+		}
+	}
+	if !archived {
+		t.Fatalf("archived conversation missing from %#v", all)
 	}
 
 	decodeResponse(t, requestJSON(t, client, http.MethodDelete, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
-	if len(active) != 1 {
+	if len(active) != 2 {
 		t.Fatalf("restored conversations = %#v", active)
 	}
 
 	decodeResponse(t, requestJSON(t, client, http.MethodPut, archiveEndpoint, server.URL, "", nil), http.StatusNoContent, nil)
-	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", server.URL, "", map[string]any{"body": "New activity", "client_id": "activity"}), http.StatusCreated, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+conversationID+"/messages", server.URL, "", map[string]any{"body": "New activity", "client_id": "activity"}), http.StatusCreated, &map[string]any{})
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, conversationEndpoint, server.URL, "", nil), http.StatusOK, &active)
-	if len(active) != 1 {
+	if len(active) != 2 {
 		t.Fatalf("conversation after activity = %#v", active)
 	}
 }
@@ -1193,6 +1206,11 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	defer server.Close()
 	client := newCookieClient(t)
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot, secondBot, conversation map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Alfred"}), http.StatusCreated, &secondBot)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Images", "visibility": "members", "member_ids": []string{bot["id"].(string), secondBot["id"].(string)}}), http.StatusCreated, &conversation)
+	conversationID := conversation["id"].(string)
 	socket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Cookie": {sessionCookieFor(t, client, server.URL).String()}})
 	defer socket.CloseNow()
 
@@ -1225,7 +1243,7 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &requestBody)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+conversationID+"/messages", &requestBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1276,7 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	retryPart, _ := retryWriter.CreatePart(retryPartHeaders)
 	_, _ = retryPart.Write(imageBytes.Bytes())
 	_ = retryWriter.Close()
-	retryRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", &retryBody)
+	retryRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+conversationID+"/messages", &retryBody)
 	retryRequest.Header.Set("Content-Type", retryWriter.FormDataContentType())
 	retryRequest.Header.Set("Origin", server.URL)
 	retryResponse, err := client.Do(retryRequest)
@@ -1300,8 +1318,6 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	if contentResponse.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", contentResponse.Header.Get("Cache-Control"))
 	}
-	var bot map[string]any
-	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
 	botRequest, _ := http.NewRequest(http.MethodGet, server.URL+attachment["content_url"].(string), nil)
 	botRequest.Header.Set("Authorization", "Bearer "+bot["api_key"].(string))
 	botResponse, err := http.DefaultClient.Do(botRequest)
@@ -1322,7 +1338,7 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	}
 	unauthorised.Body.Close()
 	var history []map[string]any
-	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", "", "", nil), http.StatusOK, &history)
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/conversations/"+conversationID+"/messages", "", "", nil), http.StatusOK, &history)
 	if len(history) != 1 {
 		t.Fatalf("history = %#v", history)
 	}
@@ -1334,7 +1350,7 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	if err := db.QueryRow(`SELECT storage_key FROM attachments WHERE id=?`, attachment["id"]).Scan(&storageKey); err != nil {
 		t.Fatal(err)
 	}
-	deleted := requestJSON(t, client, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+boot.ConversationID, server.URL, "", nil)
+	deleted := requestJSON(t, client, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+conversationID, server.URL, "", nil)
 	if deleted.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete status = %d: %s", deleted.StatusCode, readBody(deleted))
 	}
@@ -1533,6 +1549,87 @@ func TestMessageImage_RejectsDeclaredMediaTypeMismatchWithoutPersistingData(t *t
 	}
 }
 
+func TestGeneralConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "general-protection.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherConversationID := database.NewID("con")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO organisations(id,name,created_at) VALUES('org_other','Other organisation',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,'org_other','general','organisation',?)`, otherConversationID, now); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	admin := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var listed []map[string]any
+	decodeResponse(t, requestJSON(t, admin, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &listed)
+	if len(listed) != 1 || listed[0]["id"] != boot.ConversationID || listed[0]["is_general"] != true {
+		t.Fatalf("listed General = %#v", listed)
+	}
+
+	attempts := []struct {
+		name, method, endpoint string
+		body                   any
+	}{
+		{"rename", http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/title", map[string]any{"name": "Renamed"}},
+		{"archive", http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/archive", nil},
+		{"delete", http.MethodDelete, server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + boot.ConversationID, nil},
+	}
+	for _, attempt := range attempts {
+		t.Run(attempt.name, func(t *testing.T) {
+			response := requestJSON(t, admin, attempt.method, attempt.endpoint, server.URL, "", attempt.body)
+			if response.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409: %s", response.StatusCode, readBody(response))
+			}
+			response.Body.Close()
+		})
+	}
+	var otherConversation map[string]any
+	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Announcements", "visibility": "organisation"}), http.StatusCreated, &otherConversation)
+	if isGeneral, ok := otherConversation["is_general"].(bool); !ok || isGeneral {
+		t.Fatalf("other conversation is_general = %#v", otherConversation["is_general"])
+	}
+	otherID := otherConversation["id"].(string)
+	decodeResponse(t, requestJSON(t, admin, http.MethodPut, server.URL+"/api/conversations/"+otherID+"/title", server.URL, "", map[string]any{"name": "News"}), http.StatusOK, &map[string]any{})
+	response := requestJSON(t, admin, http.MethodPut, server.URL+"/api/conversations/"+otherID+"/archive", server.URL, "", nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("other conversation archive status = %d: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	response = requestJSON(t, admin, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+otherID, server.URL, "", nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("other conversation delete status = %d: %s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	crossOrganisation := requestJSON(t, admin, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+otherConversationID, server.URL, "", nil)
+	if crossOrganisation.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-organisation delete status = %d, want 403: %s", crossOrganisation.StatusCode, readBody(crossOrganisation))
+	}
+	crossOrganisation.Body.Close()
+
+	var title string
+	if err := db.QueryRow(`SELECT coalesce(title,name) FROM conversations WHERE id=?`, boot.ConversationID).Scan(&title); err != nil || title != "general" {
+		t.Fatalf("general title = %q, err=%v", title, err)
+	}
+	var archived, conversations int
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_archives WHERE conversation_id=?`, boot.ConversationID).Scan(&archived); err != nil || archived != 0 {
+		t.Fatalf("general archives = %d, err=%v", archived, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM conversations WHERE id=?`, boot.ConversationID).Scan(&conversations); err != nil || conversations != 1 {
+		t.Fatalf("general conversations = %d, err=%v", conversations, err)
+	}
+}
+
 func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "delete-conversation.db"))
 	if err != nil {
@@ -1554,6 +1651,26 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	if _, err := db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_member','member','member',?)`, boot.OrganisationID, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('usr_third','human','third@example.com','Third',?,?)`, passwordHash, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'usr_third','member','third',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	groupID := database.NewID("con")
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,?,?,'members',?)`, groupID, boot.OrganisationID, "Planning", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_members(conversation_id,user_id) VALUES(?,?),(?,'usr_member'),(?,'usr_third')`, groupID, boot.UserID, groupID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	directID := database.NewID("con")
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,?,?,'members',?)`, directID, boot.OrganisationID, "direct", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_members(conversation_id,user_id) VALUES(?,?),(?,'usr_member')`, directID, boot.UserID, directID); err != nil {
+		t.Fatal(err)
+	}
 
 	handler := httpapi.New(httpapi.Dependencies{DB: db})
 	server := httptest.NewServer(handler)
@@ -1562,12 +1679,17 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	member := newCookieClient(t)
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
 	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "member@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	directDelete := requestJSON(t, admin, http.MethodDelete, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations/"+directID, server.URL, "", nil)
+	if directDelete.StatusCode != http.StatusConflict {
+		t.Fatalf("direct delete status = %d, want 409: %s", directDelete.StatusCode, readBody(directDelete))
+	}
+	directDelete.Body.Close()
 	memberSocket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Cookie": {sessionCookieFor(t, member, server.URL).String()}})
 	defer memberSocket.CloseNow()
-	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", server.URL, "", map[string]any{"body": "This conversation will be deleted", "client_id": "before-delete"}), http.StatusCreated, &map[string]any{})
+	decodeResponse(t, requestJSON(t, member, http.MethodPost, server.URL+"/api/conversations/"+groupID+"/messages", server.URL, "", map[string]any{"body": "This conversation will be deleted", "client_id": "before-delete"}), http.StatusCreated, &map[string]any{})
 	_ = readEvent(t, memberSocket)
 
-	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + boot.ConversationID
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + groupID
 	denied := requestJSON(t, member, http.MethodDelete, endpoint, server.URL, "", nil)
 	if denied.StatusCode != http.StatusForbidden {
 		t.Fatalf("member delete status = %d, want 403: %s", denied.StatusCode, readBody(denied))
@@ -1575,7 +1697,7 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	denied.Body.Close()
 
 	slowBody := &delayedJSONBody{started: make(chan struct{}), release: make(chan struct{}), body: []byte(`{"body":"Too late","client_id":"after-delete"}`)}
-	slowRequest := httptest.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+boot.ConversationID+"/messages", slowBody)
+	slowRequest := httptest.NewRequest(http.MethodPost, server.URL+"/api/conversations/"+groupID+"/messages", slowBody)
 	slowRequest.AddCookie(sessionCookieFor(t, member, server.URL))
 	slowRequest.Header.Set("Origin", server.URL)
 	slowRecorder := httptest.NewRecorder()
@@ -1593,7 +1715,7 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	deleted.Body.Close()
 	deletedEvent := readEvent(t, memberSocket)
 	deletedPayload, _ := deletedEvent["payload"].(map[string]any)
-	if deletedEvent["type"] != "conversation.deleted" || deletedPayload["id"] != boot.ConversationID {
+	if deletedEvent["type"] != "conversation.deleted" || deletedPayload["id"] != groupID {
 		t.Fatalf("deleted event = %#v", deletedEvent)
 	}
 	close(slowBody.release)
@@ -1602,9 +1724,13 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 		t.Fatalf("in-flight post status = %d, want 403: %s", slowRecorder.Code, slowRecorder.Body.String())
 	}
 
-	var conversations []map[string]string
+	var conversations []map[string]any
 	decodeResponse(t, requestJSON(t, member, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", "", "", nil), http.StatusOK, &conversations)
-	if len(conversations) != 0 {
+	remainingIDs := map[string]bool{}
+	for _, conversation := range conversations {
+		remainingIDs[conversation["id"].(string)] = true
+	}
+	if len(conversations) != 2 || !remainingIDs[boot.ConversationID] || !remainingIDs[directID] || remainingIDs[groupID] {
 		t.Fatalf("conversations after delete = %#v", conversations)
 	}
 	for label, query := range map[string]string{
@@ -1613,7 +1739,7 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 		"realtime events": `SELECT count(*) FROM realtime_events WHERE conversation_id=?`,
 	} {
 		var count int
-		if err := db.QueryRow(query, boot.ConversationID).Scan(&count); err != nil || count != 0 {
+		if err := db.QueryRow(query, groupID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("%s after delete = %d, err=%v", label, count, err)
 		}
 	}

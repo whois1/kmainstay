@@ -218,7 +218,7 @@ func (s *server) organisations(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	includeArchived := r.URL.Query().Get("include_archived") == "true"
-	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,coalesce(c.title,c.name),c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,coalesce(c.title,c.name),c.visibility,c.visibility='organisation' AND c.name='general',coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
 		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at),c.title_automatic,
 		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]'),archive.user_id IS NOT NULL
 		FROM conversations c
@@ -240,11 +240,11 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, name, visibility, activityAt, memberIDsJSON string
 		var readSequence, latestSequence int64
-		var titleAutomatic, archived bool
-		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON, &archived) == nil {
+		var isGeneral, titleAutomatic, archived bool
+		if rows.Scan(&id, &name, &visibility, &isGeneral, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON, &archived) == nil {
 			var memberIDs []string
 			_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic, "archived": archived})
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "is_general": isGeneral, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic, "archived": archived})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -356,7 +356,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "is_general": in.Visibility == "organisation" && internalName == "general", "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
 }
 
 func (s *server) conversationByInternalName(ctx context.Context, organisationID, internalName string) (map[string]any, error) {
@@ -372,7 +372,7 @@ func (s *server) conversationByInternalName(ctx context.Context, organisationID,
 	if err := json.Unmarshal([]byte(memberIDsJSON), &memberIDs); err != nil {
 		return nil, err
 	}
-	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
+	return map[string]any{"id": id, "name": name, "visibility": visibility, "is_general": visibility == "organisation" && internalName == "general", "member_ids": memberIDs, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
 }
 
 func (s *server) updateConversationTitle(w http.ResponseWriter, r *http.Request) {
@@ -386,6 +386,13 @@ func (s *server) updateConversationTitle(w http.ResponseWriter, r *http.Request)
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" || len(input.Name) > 20000 {
 		writeError(w, http.StatusBadRequest, "invalid title")
+		return
+	}
+	if !s.canAccess(r.Context(), conversationID, current(r).ID) {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if s.rejectOrganisationConversationMutation(w, r, conversationID) {
 		return
 	}
 	principalID := current(r).ID
@@ -489,7 +496,7 @@ func (s *server) exactDirectConversation(ctx context.Context, organisationID, cu
 	}
 	var memberIDs []string
 	_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-	return map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
+	return map[string]any{"id": id, "name": name, "visibility": visibility, "is_general": false, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic}, nil
 }
 
 func (s *server) archiveConversation(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +504,9 @@ func (s *server) archiveConversation(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.PathValue("conversation")
 	if principal.Kind != "human" || !s.canAccess(r.Context(), conversationID, principal.ID) {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if s.rejectOrganisationConversationMutation(w, r, conversationID) {
 		return
 	}
 	if _, err := s.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO conversation_archives(user_id,conversation_id,archived_at) VALUES(?,?,?)`, principal.ID, conversationID, nowText()); err != nil {
@@ -521,8 +531,12 @@ func (s *server) restoreConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
-	if current(r).Kind != "human" {
+	organisationID := r.PathValue("organisation")
+	if current(r).Kind != "human" || s.organisationRole(r.Context(), organisationID, current(r).ID) != "admin" {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	if s.rejectPermanentConversationDeletion(w, r, organisationID, r.PathValue("conversation")) {
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -557,8 +571,9 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	result, err := tx.ExecContext(r.Context(), `DELETE FROM conversations
 		WHERE id=? AND organisation_id=?
 		AND EXISTS(SELECT 1 FROM organisation_memberships
-			WHERE organisation_id=? AND user_id=? AND role='admin')`,
-		r.PathValue("conversation"), r.PathValue("organisation"), r.PathValue("organisation"), current(r).ID)
+			WHERE organisation_id=? AND user_id=? AND role='admin')
+		AND (conversations.visibility='organisation' OR (SELECT COUNT(*) FROM conversation_members WHERE conversation_id=conversations.id) >= 3)`,
+		r.PathValue("conversation"), organisationID, organisationID, current(r).ID)
 	if err != nil {
 		returnServerError(w)
 		return
@@ -583,6 +598,49 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.publishConversationDeleted(r.PathValue("organisation"), r.PathValue("conversation"))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) rejectOrganisationConversationMutation(w http.ResponseWriter, r *http.Request, conversationID string) bool {
+	var visibility, internalName string
+	err := s.db.QueryRowContext(r.Context(), `SELECT visibility,name FROM conversations WHERE id=?`, conversationID).Scan(&visibility, &internalName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		returnServerError(w)
+		return true
+	}
+	if visibility != "organisation" || internalName != "general" {
+		return false
+	}
+	writeError(w, http.StatusConflict, "General cannot be renamed, archived or deleted")
+	return true
+}
+
+func (s *server) rejectPermanentConversationDeletion(w http.ResponseWriter, r *http.Request, organisationID, conversationID string) bool {
+	var visibility, internalName string
+	var memberCount int
+	err := s.db.QueryRowContext(r.Context(), `SELECT conversation.visibility, conversation.name, COUNT(member.user_id)
+		FROM conversations conversation
+		LEFT JOIN conversation_members member ON member.conversation_id=conversation.id
+		WHERE conversation.id=? AND conversation.organisation_id=?
+		GROUP BY conversation.id`, conversationID, organisationID).Scan(&visibility, &internalName, &memberCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		returnServerError(w)
+		return true
+	}
+	if visibility == "organisation" && internalName == "general" {
+		writeError(w, http.StatusConflict, "General cannot be renamed, archived or deleted")
+		return true
+	}
+	if visibility == "members" && memberCount > 0 && memberCount < 3 {
+		writeError(w, http.StatusConflict, "direct conversations cannot be deleted for everyone")
+		return true
+	}
+	return false
 }
 
 func (s *server) eligibleOrganisationUsers(w http.ResponseWriter, r *http.Request) {

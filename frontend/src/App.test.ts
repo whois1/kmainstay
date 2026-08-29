@@ -101,13 +101,14 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('section[data-testid=settings-page][aria-label="Organisation settings"]')).toBeTruthy()
   })
 
-  it('gives the compact delete control a complete accessible name', async () => {
+  it('does not expose General lifecycle mutations', async () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(loadedFetcher()), socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    const deleteButton = wrapper.get('[data-testid=delete-conversation]')
-    expect(deleteButton.attributes('aria-label')).toBe('Delete conversation')
-    expect(deleteButton.get('[aria-hidden=true]').text()).toBe('Delete')
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=pinned-conversations] [data-testid=conversation-checkbox]').exists()).toBe(false)
   })
 
   it('contains modal focus, closes with Escape and restores the opener', async () => {
@@ -128,7 +129,7 @@ describe('K-Mainstay UI', () => {
     const lastCheckbox = wrapper.findAll('[data-testid=create-conversation] input[type=checkbox]').at(-1)!
     ;(lastCheckbox.element as HTMLElement).focus()
     await dialog.trigger('keydown', { key: 'Tab' })
-    expect(document.activeElement).toBe(wrapper.get('[data-testid=create-conversation] .close').element)
+    expect(document.activeElement).toBe(wrapper.get('[data-testid=close-conversation-dialog]').element)
 
     await dialog.trigger('keydown', { key: 'Escape' })
     await flushPromises()
@@ -142,7 +143,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({}, 401))
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
       .mockImplementationOnce(() => json([]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
@@ -162,7 +163,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url.startsWith('/api/organisations/o1/conversations')) return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived }])
+      if (url.startsWith('/api/organisations/o1/conversations')) return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived }])
       if (url === '/api/conversations/c1/messages?limit=100') return json([original])
       if (url === '/api/organisations/o1/users') return json([])
       if (url === '/api/conversations/c1/read') return json({ sequence: 1 })
@@ -195,8 +196,8 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', archived: archivedConversationIDs.has('c1') },
-        { id: 'c2', name: 'planning', visibility: 'organisation', archived: archivedConversationIDs.has('c2') },
+        { id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: archivedConversationIDs.has('c1') },
+        { id: 'c2', name: 'planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: archivedConversationIDs.has('c2') },
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -228,8 +229,8 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', archived: firstConversationArchived },
-        { id: 'c2', name: 'planning', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: firstConversationArchived },
+        { id: 'c2', name: 'planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -318,7 +319,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') {
         conversationLoads++
-        return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: false }])
+        return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: false }])
       }
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -357,7 +358,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') {
         conversationLoads++
-        return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: conversationLoads > 1 }])
+        return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: conversationLoads > 1 }])
       }
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -396,7 +397,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') {
         conversationLoads++
-        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: false }])
+        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: false }])
         return pendingRefresh
       }
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
@@ -409,7 +410,7 @@ describe('K-Mainstay UI', () => {
     EventSocket.instance.onopen?.()
     await Promise.resolve()
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 1, payload: realtimeMessage }) } as MessageEvent)
-    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: true, latest_sequence: 0 }]))
+    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: true, latest_sequence: 0 }]))
     await flushPromises()
 
     expect(wrapper.find('[data-testid=archived-conversations]').exists()).toBe(false)
@@ -433,9 +434,9 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') {
         conversationLoads++
-        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: false }])
+        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: false }])
         if (conversationLoads === 2) return pendingRefresh
-        return json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: true }])
+        return json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: true }])
       }
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -451,7 +452,7 @@ describe('K-Mainstay UI', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('general')
 
-    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'organisation', archived: false }]))
+    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], archived: false }]))
     await flushPromises()
 
     expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('general')
@@ -461,7 +462,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
       .mockImplementationOnce(() => json([
         { id: 'm1', author_name: 'Michael', author_kind: 'human', body: 'Hello **bot**', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
         { id: 'm2', author_name: 'Hector', author_kind: 'bot', body: 'Hello human', created_at: '2026-01-01T00:00:01Z', sequence: 2 },
@@ -492,7 +493,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/conversations/c1/messages?limit=100' && !init) return json([])
       if (url === '/api/organisations/o1/users') return json([])
       if (url === '/api/conversations/c1/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: '', created_at: '2026-01-01T00:00:00Z', sequence: 1, attachments }, 201)
@@ -524,7 +525,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/conversations/c1/messages?limit=100' && !init) return json([])
       if (url === '/api/organisations/o1/users') return json([])
       if (url === '/api/conversations/c1/messages' && init?.method === 'POST') {
@@ -601,7 +602,7 @@ describe('K-Mainstay UI', () => {
 	const fetcher = vi.fn()
 	  .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
 	  .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-	  .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1 }]))
+	  .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1 }]))
 	  .mockImplementationOnce(() => json(messagesForReadTest()))
 	  .mockImplementationOnce(() => json({ sequence: 2 }))
 	mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
@@ -616,7 +617,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 2, latest_sequence: 3 }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 2, latest_sequence: 3 }])
       if (url === '/api/conversations/c1/messages?limit=100&after_sequence=2') return json([unreadMessage])
       if (url === '/api/conversations/c1/messages?limit=100&before=m3') return json(recentHistory)
       if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
@@ -635,7 +636,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 2, latest_sequence: 3 }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 2, latest_sequence: 3 }])
       if (url === '/api/conversations/c1/messages?limit=100&after_sequence=2') return json([unreadMessage])
       if (url === '/api/conversations/c1/messages?limit=100&before=m3') return json({ error: 'History unavailable' }, 500)
       if (url === '/api/conversations/c1/read') return json({ sequence: 3 })
@@ -655,7 +656,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 2 },
         { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
       ])
       if (url === '/api/conversations/c1/messages?limit=100&after_sequence=1') return pendingUnreadMessages
@@ -683,7 +684,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 201 }]))
       .mockImplementationOnce(() => json(unreadPage))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 101 }))
@@ -728,7 +729,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 0, latest_sequence: 0 },
         { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 },
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
@@ -770,7 +771,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 0, latest_sequence: 0 },
         { id: 'c2', name: 'planning', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 },
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
@@ -810,7 +811,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 201 }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 201 }])
       if (url === '/api/conversations/c1/messages?limit=100&after_sequence=1') return json(unreadPage)
       if (url === '/api/conversations/c1/messages?limit=100&before=m2') return json([])
       if (url === '/api/conversations/c1/messages?limit=100') return latestMessages
@@ -868,6 +869,17 @@ describe('K-Mainstay UI', () => {
     await flushPromises()
     expect(wrapper.get('.dialog-context').text()).toBe('New group chat')
     expect(wrapper.get('#conversation-dialog-title').text()).toBe('Create group chat')
+    const form = wrapper.get('[data-testid=create-conversation]')
+    const nameInput = wrapper.get('[data-testid=conversation-name]')
+    const closeButton = wrapper.get('[data-testid=close-conversation-dialog]')
+    expect(closeButton.element.closest('.dialog-header')).not.toBeNull()
+    expect(closeButton.element.closest('form')).toBeNull()
+    expect(form.attributes('autocomplete')).toBe('off')
+    expect(nameInput.attributes('name')).toBe('group_chat_title')
+    expect(nameInput.attributes('autocomplete')).toBe('off')
+    expect(nameInput.attributes('data-1p-ignore')).toBe('true')
+    expect(nameInput.attributes('data-lpignore')).toBe('true')
+    expect(nameInput.attributes('data-bwignore')).toBe('true')
     const submit = wrapper.get('[data-testid=create-conversation] button[type=submit]')
     expect(submit.attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid=conversation-name]').setValue('Planning')
@@ -888,7 +900,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') {
         rosterRequests++
@@ -924,7 +936,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'c2', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true, activity_at: '2026-08-24T09:00:00Z' }, 201)
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/conversations/c2/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'c2', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Improve agent navigation', created_at: '2026-08-24T09:00:01Z', sequence: 1 }, 201)
@@ -972,7 +984,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') {
         conversationLoads++
-        return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+        return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       }
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([
@@ -1011,7 +1023,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
         conversationLoads++
-        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
         return pendingRefresh
       }
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'c2', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true }, 201)
@@ -1032,7 +1044,7 @@ describe('K-Mainstay UI', () => {
     await wrapper.get('[data-testid=composer]').trigger('submit')
     await flushPromises()
 
-    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+    finishRefresh(await json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
     await flushPromises()
 
     expect(wrapper.get('h1').text()).toBe('Keep this chat selected')
@@ -1057,9 +1069,9 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
         conversationLoads++
-        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+        if (conversationLoads === 1) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
         return json([
-          { id: 'c1', name: 'general', visibility: 'organisation' },
+          { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
           { id: 'c2', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true },
         ])
       }
@@ -1093,7 +1105,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ error: 'Could not create chat' }, 500)
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([
@@ -1120,7 +1132,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') {
         creationAttempts++
         if (creationAttempts === 1) return Promise.reject(new Error('response lost'))
@@ -1163,8 +1175,8 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'Alpha', visibility: 'organisation' },
-        { id: 'c2', name: 'Beta', visibility: 'organisation' },
+        { id: 'c1', name: 'Alpha', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
+        { id: 'c2', name: 'Beta', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
       ])
       if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -1200,7 +1212,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'First topic', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 2 },
       ])
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'c3', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true }, 201)
@@ -1231,7 +1243,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'group1', name: 'Launch planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], latest_sequence: 2 },
       ])
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'group2', name: 'New Launch planning session', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], title_automatic: true }, 201)
@@ -1269,7 +1281,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation', latest_sequence: 0 },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true, latest_sequence: 0 },
         { id: 'direct-old', name: 'Hector legacy', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 0 },
         { id: 'direct-new', name: 'Another legacy title', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 0 },
       ])
@@ -1303,7 +1315,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
       if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/c2/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([
@@ -1336,7 +1348,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
       if (url === '/api/organisations/o1/direct-conversations/b1') {
         creationAttempts++
         return creationAttempts === 1
@@ -1371,7 +1383,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ])
       if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
@@ -1403,7 +1415,7 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ])
       if (url === '/api/organisations/o1/direct-conversations/b1') return pendingCreation
@@ -1433,8 +1445,8 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
-        { id: 'c2', name: 'planning', visibility: 'organisation' },
+        { id: 'c1', name: 'Roadmap', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
+        { id: 'c2', name: 'planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
       ]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
@@ -1443,20 +1455,21 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
+    await wrapper.get('[data-testid=conversation-actions-menu]').trigger('click')
     await wrapper.get('[data-testid=delete-conversation]').trigger('click')
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledWith('Delete #general? This removes its messages and nobody will be able to send to it.')
+    expect(confirm).toHaveBeenCalledWith('Delete #Roadmap for everyone? This permanently removes all messages in this conversation.')
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
-    expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
+    expect(wrapper.findAll('nav button').some(button => button.text().includes('Roadmap'))).toBe(false)
     expect(wrapper.get('h1').text()).toBe('# planning')
     confirm.mockRestore()
   })
 
   it('lets an admin delete selected conversations after one bulk confirmation', async () => {
     const conversations = [
-      { id: 'c1', name: 'general', visibility: 'organisation' },
-      { id: 'c2', name: 'planning', visibility: 'organisation' },
+      { id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
+      { id: 'c2', name: 'planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
     ]
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
@@ -1490,8 +1503,8 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
       if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
-        { id: 'c2', name: 'planning', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
+        { id: 'c2', name: 'planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] },
       ])
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/organisations/o1/users') return json([])
@@ -1512,7 +1525,7 @@ describe('K-Mainstay UI', () => {
     confirm.mockRestore()
   })
 
-  it('names the topic and other user when confirming direct-conversation deletion', async () => {
+  it('does not expose permanent deletion for a direct conversation', async () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
@@ -1524,14 +1537,11 @@ describe('K-Mainstay UI', () => {
       ])
       throw new Error(`Unexpected request: ${url}`)
     })
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
-
-    expect(confirm).toHaveBeenCalledWith('Delete "Forecast review" with Hector? This removes its messages and nobody will be able to send to it.')
-    confirm.mockRestore()
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
   })
 
   it('presents a one-member private conversation as a removed direct conversation', async () => {
@@ -1543,7 +1553,6 @@ describe('K-Mainstay UI', () => {
       if (url === '/api/organisations/o1/users') return json([{ id: 'u1', name: 'Michael', kind: 'human', role: 'admin' }])
       throw new Error(`Unexpected request: ${url}`)
     })
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
 
@@ -1553,28 +1562,10 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.text()).toContain('Historical message')
     expect(wrapper.get('[data-testid=composer] textarea').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid=composer] textarea').attributes('placeholder')).toBe('Conversation unavailable')
-
-    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
-    expect(confirm).toHaveBeenCalledWith('Delete conversation with Removed user? This removes its messages and nobody will be able to send to it.')
-    confirm.mockRestore()
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
   })
 
-  it('shows a clear empty state after deleting the last conversation', async () => {
-    const fetcher = loadedFetcher()
-    fetcher.mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
-    await flushPromises()
-
-    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('No conversations')
-    expect(wrapper.text()).not.toContain('# Choose a conversation')
-    expect(wrapper.find('[data-testid=composer]').exists()).toBe(false)
-    expect(wrapper.findAll('.sidebar-navigation section > button')).toHaveLength(0)
-    confirm.mockRestore()
-  })
 
   it('does not preserve a failed read cursor across reconnect refreshes', async () => {
     class EventSocket {
@@ -1589,11 +1580,11 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ error: 'Read sync failed' }, 500))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 2 }))
@@ -1621,11 +1612,11 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json({ sequence: 2 }))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 2 }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1, latest_sequence: 2 }]))
       .mockImplementationOnce(() => json([message]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: EventSocket } } })
     await flushPromises()
@@ -1725,7 +1716,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ]))
       .mockImplementationOnce(() => json([]))
@@ -1740,7 +1731,7 @@ describe('K-Mainstay UI', () => {
     finishDeletionRefresh(await json([{ id: 'c2', name: 'planning', visibility: 'organisation' }]))
     await flushPromises()
     finishStaleRefresh(await json([
-      { id: 'c1', name: 'general', visibility: 'organisation' },
+      { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
       { id: 'c2', name: 'planning', visibility: 'organisation' },
     ]))
     await flushPromises()
@@ -1764,7 +1755,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ]))
       .mockImplementationOnce(() => json([]))
@@ -1796,7 +1787,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
         { id: 'c3', name: 'delivery', visibility: 'organisation' },
       ]))
@@ -1834,7 +1825,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'general', visibility: 'organisation', is_general: true },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ]))
       .mockImplementationOnce(() => json([]))
@@ -1932,7 +1923,7 @@ describe('K-Mainstay UI', () => {
     const fetcher = vi.fn()
       .mockImplementationOnce(() => json({ id: 'u2', name: 'Member', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'member' }]))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
       .mockImplementationOnce(() => json([]))
       .mockImplementationOnce(() => json([{ id: 'b1', name: 'Hector', kind: 'bot', role: 'member' }]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
@@ -1997,7 +1988,7 @@ describe('K-Mainstay UI', () => {
         { id: 'b1', name: 'Hector', kind: 'bot', role: 'member' },
       ]))
       .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
-      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
     await wrapper.get('[data-testid=organisation-settings]').trigger('click')
@@ -2044,7 +2035,7 @@ function loadedFetcher() {
   return vi.fn()
     .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
     .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-    .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+    .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }]))
     .mockImplementationOnce(() => json([]))
 }
 
@@ -2052,7 +2043,7 @@ function replyRetryFetcher(messages: unknown, posts: Array<Record<string, string
   return vi.fn((url: string, init?: RequestInit) => {
     if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
     if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-    if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+    if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', is_general: true }])
     if (url === '/api/conversations/c1/messages?limit=100' && !init) return json(Array.isArray(messages) ? messages : [messages])
     if (url === '/api/organisations/o1/users') return json([])
     if (url === '/api/conversations/c1/messages' && init?.method === 'POST') {

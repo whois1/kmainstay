@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import ConversationView from './ConversationView.vue'
 import type { Conversation, Message, User } from '../types'
 
-const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', read_sequence: 1 }
+const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1 }
+const groupConversation: Conversation = { id: 'group', name: 'Planning', visibility: 'members', member_ids: ['reader', 'hector', 'mary'], read_sequence: 1 }
 const messages: Message[] = [
   { id: 'first', conversation_id: 'conversation', author_id: 'reader', author_name: 'Reader', author_kind: 'human', body: 'Read', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
   { id: 'second', conversation_id: 'conversation', author_id: 'writer', author_name: 'Writer', author_kind: 'human', body: 'Unread', created_at: '2026-01-01T00:00:01Z', sequence: 2 },
@@ -18,7 +19,7 @@ describe('ConversationView', () => {
   it('shows reply context and emits reply and archive actions', async () => {
     const reply = { id: 'original', author_name: 'Reader', body: 'Original text' }
     const replyMessage: Message = { ...messages[1], reply_to: reply }
-    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [messages[0], replyMessage], composer: '', busy: false, error: '', canDelete: false, replyingTo: messages[0] } })
+    const wrapper = mount(ConversationView, { props: { selected: groupConversation, messages: [messages[0], replyMessage], composer: '', busy: false, error: '', canDelete: false, replyingTo: messages[0] } })
 
     expect(wrapper.get('[data-testid=reply-preview]').text()).toContain('Reader')
     expect(wrapper.get('[data-testid=message-reply]').text()).toContain('Original text')
@@ -29,14 +30,14 @@ describe('ConversationView', () => {
   })
 
   it('offers restore for an archived conversation', async () => {
-    const wrapper = mount(ConversationView, { props: { selected: { ...conversation, archived: true }, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const wrapper = mount(ConversationView, { props: { selected: { ...groupConversation, archived: true }, messages: [], composer: '', busy: false, error: '', canDelete: false } })
     expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
     await wrapper.get('[data-testid=restore-conversation]').trigger('click')
     expect(wrapper.emitted('restoreConversation')).toEqual([[]])
   })
 
   it('lets the user edit the conversation title inline', async () => {
-    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
+    const wrapper = mount(ConversationView, { props: { selected: groupConversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
 
     await wrapper.get('[data-testid=edit-conversation-title]').trigger('click')
     const input = wrapper.get('[data-testid=conversation-title-input]')
@@ -44,6 +45,34 @@ describe('ConversationView', () => {
     await wrapper.get('[data-testid=conversation-title-form]').trigger('submit')
 
     expect(wrapper.emitted('updateTitle')).toEqual([['Better title']])
+  })
+
+  it('keeps General visible and removes its lifecycle mutations', () => {
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=restore-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+  })
+
+  it('keeps other organisation-wide conversations mutable', () => {
+    const wrapper = mount(ConversationView, { props: { selected: { id: 'announcements', name: 'Announcements', visibility: 'organisation' }, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(true)
+  })
+
+  it('puts permanent deletion behind an admin action menu', async () => {
+    const wrapper = mount(ConversationView, { props: { selected: groupConversation, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
+    await wrapper.get('[data-testid=conversation-actions-menu]').trigger('click')
+    const deleteButton = wrapper.get('[data-testid=delete-conversation]')
+    expect(deleteButton.text()).toBe('Delete for everyone')
+    await deleteButton.trigger('click')
+    expect(wrapper.emitted('deleteConversation')).toEqual([[]])
   })
 
   it('renders authorised image attachments inline', () => {
