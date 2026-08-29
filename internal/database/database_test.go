@@ -31,7 +31,7 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 11 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var attachmentPositionColumns int
@@ -233,6 +233,121 @@ func TestNormalizeName_TrimsUnicodeWhitespaceAndLowercasesUnicode(t *testing.T) 
 	if got := database.NormalizeName("\u2003E\u0301LODIE\u00a0"); got != "élodie" {
 		t.Fatalf("normalised name = %q", got)
 	}
+	if got := database.NormalizeName("Straße"); got != "straße" {
+		t.Fatalf("normalised user name = %q", got)
+	}
+}
+
+func TestNormalizeConversationName_UsesFullUnicodeCaseFolding(t *testing.T) {
+	street := database.NormalizeConversationName("Straße")
+	uppercase := database.NormalizeConversationName("STRASSE")
+	if street != uppercase {
+		t.Fatalf("normalised conversation names differ: %q != %q", street, uppercase)
+	}
+}
+
+func TestOpen_MigratesConversationNamesToUniqueNormalisedValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conversation-names.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`DROP INDEX conversations_visible_name_unique`,
+		`ALTER TABLE conversations DROP COLUMN name_normalized`,
+		`DELETE FROM schema_migrations WHERE version=12`,
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('first','org','first',' École ','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('second','org','second','ÉCOLE','organisation','2026-01-02T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('street','org','street','Straße','organisation','2026-01-03T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('uppercase-street','org','uppercase-street','STRASSE','organisation','2026-01-04T00:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var firstTitle, firstNormalised, secondTitle, secondNormalised string
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='first'`).Scan(&firstTitle, &firstNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='second'`).Scan(&secondTitle, &secondNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if firstTitle != "École" || firstNormalised != "école" || secondTitle != "ÉCOLE 2" || secondNormalised != "école 2" {
+		t.Fatalf("migrated titles = %q/%q normalized=%q/%q", firstTitle, secondTitle, firstNormalised, secondNormalised)
+	}
+	var streetTitle, streetNormalised, uppercaseStreetTitle, uppercaseStreetNormalised string
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='street'`).Scan(&streetTitle, &streetNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='uppercase-street'`).Scan(&uppercaseStreetTitle, &uppercaseStreetNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if streetTitle != "Straße" || streetNormalised != "strasse" || uppercaseStreetTitle != "STRASSE 2" || uppercaseStreetNormalised != "strasse 2" {
+		t.Fatalf("case-folded migrated titles = %q/%q normalized=%q/%q", streetTitle, uppercaseStreetTitle, streetNormalised, uppercaseStreetNormalised)
+	}
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('third','org','third',' école ','école','organisation','2026-01-05T00:00:00Z')`); err == nil {
+		t.Fatal("duplicate normalised conversation name was accepted")
+	}
+}
+
+func TestOpen_MigratesGeneralToVisibleUnarchivedEveryone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "everyone.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','2026-01-01T00:00:00Z')`,
+		`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('owner','human','owner@example.com','Owner','hash','2026-01-01T00:00:00Z')`,
+		`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','owner','admin','owner','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('general','org','general','General','general','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('user-everyone','org','user-everyone','Everyone','everyone','organisation','2026-01-02T00:00:00Z')`,
+		`INSERT INTO conversation_archives(user_id,conversation_id,archived_at) VALUES('owner','general','2026-01-03T00:00:00Z')`,
+		`DROP INDEX conversations_one_everyone_per_organisation`,
+		`ALTER TABLE conversations DROP COLUMN is_everyone`,
+		`DELETE FROM schema_migrations WHERE version=13`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var internalName, title, normalized string
+	var isEveryone bool
+	if err := db.QueryRow(`SELECT name,title,name_normalized,is_everyone FROM conversations WHERE id='general'`).Scan(&internalName, &title, &normalized, &isEveryone); err != nil {
+		t.Fatal(err)
+	}
+	var collisionTitle string
+	if err := db.QueryRow(`SELECT title FROM conversations WHERE id='user-everyone'`).Scan(&collisionTitle); err != nil {
+		t.Fatal(err)
+	}
+	var archiveCount int
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_archives WHERE conversation_id='general'`).Scan(&archiveCount); err != nil {
+		t.Fatal(err)
+	}
+	if internalName != "everyone:general" || title != "Everyone" || normalized != "everyone" || !isEveryone || collisionTitle != "Everyone 2" || archiveCount != 0 {
+		t.Fatalf("everyone name=%q title=%q normalized=%q special=%v collision=%q archives=%d", internalName, title, normalized, isEveryone, collisionTitle, archiveCount)
+	}
 }
 
 func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
@@ -267,7 +382,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 11 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string

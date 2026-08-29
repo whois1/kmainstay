@@ -13,7 +13,7 @@ Michael is the only human user initially. Human invitations and public registrat
 ## First complete experience
 
 1. Michael logs in to the web application.
-2. Michael opens the default organisation and `general` conversation.
+2. Michael opens the default organisation and `Everyone` conversation.
 3. Michael creates a user named Hector with type `bot`.
 4. K-Mainstay displays one copy-once API key.
 5. Michael gives that key to Hector and asks it to connect.
@@ -76,7 +76,7 @@ The MVP slice is complete only when a clean local instance can demonstrate:
 2. login through the Vue web app;
 3. create Hector and copy its API key;
 4. connect a reference bot using only the service URL and key;
-5. exchange Markdown and image messages in `general` without refreshing;
+5. exchange Markdown and image messages in `Everyone` without refreshing;
 6. restart the Go process and retain the database and attachment bytes;
 7. revoke Hector’s key and observe access denial;
 8. pass backend, frontend, race, type, build, and end-to-end checks.

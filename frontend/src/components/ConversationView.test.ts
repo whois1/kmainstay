@@ -72,6 +72,14 @@ describe('ConversationView', () => {
     expect(wrapper.emitted('restoreConversation')).toEqual([[]])
   })
 
+  it('does not offer mutations for Everyone', () => {
+    const wrapper = mount(ConversationView, { props: { selected: { ...conversation, name: 'Everyone', is_everyone: true }, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
+  })
+
   it('lets the user edit the conversation title inline', async () => {
     const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: false } })
 
