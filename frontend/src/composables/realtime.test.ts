@@ -38,4 +38,19 @@ describe('realtime connection', () => {
     expect(reconnected).toHaveBeenCalledTimes(2)
     realtime.disconnect()
   })
+
+  it('delivers message updates separately and advances the reconnect cursor', () => {
+    const created = vi.fn()
+    const updated = vi.fn()
+    const realtime = useRealtime(created, FakeSocket as unknown as typeof WebSocket, undefined, undefined, undefined, updated)
+    realtime.connect()
+    const payload = { id: 'msg_1', body: 'Edited', sequence: 3 }
+    FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 8, payload }) } as MessageEvent)
+
+    expect(created).not.toHaveBeenCalled()
+    expect(updated).toHaveBeenCalledWith(payload, 8)
+    FakeSocket.instances[0].onclose?.()
+    vi.advanceTimersByTime(1000)
+    expect(FakeSocket.instances[1].url).toMatch(/after=8$/)
+  })
 })

@@ -805,6 +805,7 @@ describe('K-Mainstay UI', () => {
     }))
     const latestPage = Array.from({ length: 100 }, (_, index) => ({ ...unreadPage[index], id: `m${index + 102}`, body: `Message ${index + 102}`, sequence: index + 102 }))
     const realtimeMessage = { ...latestPage[99], id: 'm202', body: 'Realtime 202', sequence: 202 }
+    const realtimeEdit = { ...latestPage[99], body: 'Durable realtime edit', edited_at: '2026-01-01T00:00:03Z' }
     let finishLatestMessages!: (response: Response) => void
     const latestMessages = new Promise<Response>(resolve => { finishLatestMessages = resolve })
     const fetcher = vi.fn((url: string) => {
@@ -822,12 +823,14 @@ describe('K-Mainstay UI', () => {
 
     await wrapper.get('[data-testid=jump-to-bottom]').trigger('click')
     EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 202, payload: realtimeMessage }) } as MessageEvent)
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 203, payload: realtimeEdit }) } as MessageEvent)
     finishLatestMessages(await json(latestPage))
     await flushPromises()
 
     const renderedMessages = wrapper.findAll('[data-testid=message]')
     expect(renderedMessages[renderedMessages.length - 1]?.attributes('data-message-id')).toBe('m202')
     expect(wrapper.text()).toContain('Realtime 202')
+    expect(wrapper.text()).toContain('Durable realtime edit')
     expect(wrapper.find('[data-testid=jump-to-bottom]').exists()).toBe(false)
   })
 
@@ -2011,6 +2014,156 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('[data-testid=bots-section]').text()).not.toContain('Hector')
     expect(wrapper.text()).toContain('Hector removed')
   })
+
+  it('saves an edit through the API and replaces loaded messages and reply previews on live updates', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const original = { id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Original', created_at: '2026-01-01T00:00:00Z', sequence: 1 }
+    const reply = { id: 'm2', conversation_id: 'c1', author_id: 'b1', author_name: 'Hector', author_kind: 'bot', body: 'Reply', created_at: '2026-01-01T00:00:01Z', sequence: 2, reply_to: { id: 'm1', author_name: 'Michael', body: 'Original' } }
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 2, latest_sequence: 2 }])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([original, reply])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/messages/m1' && init?.method === 'PUT') return json({ ...original, body: 'Saved edit', edited_at: '2026-01-01T00:00:02Z' })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=edit-message]').trigger('click')
+    await wrapper.get('[data-testid=message-edit-textarea]').setValue('Saved edit')
+    await wrapper.get('[data-testid=message-edit-form]').trigger('submit')
+    await flushPromises()
+    expect(fetcher).toHaveBeenCalledWith('/api/conversations/c1/messages/m1', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ body: 'Saved edit' }) }))
+    expect(wrapper.get('[data-message-id=m1]').text()).toContain('Saved edit')
+    expect(wrapper.get('[data-message-id=m2] [data-testid=message-reply]').text()).toContain('Saved edit')
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 4, payload: { ...original, body: 'Live edit', edited_at: '2026-01-01T00:00:03Z' } }) } as MessageEvent)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-message-id=m1]').text()).toContain('Live edit')
+    expect(wrapper.get('[data-message-id=m2] [data-testid=message-reply]').text()).toContain('Live edit')
+  })
+
+  it('keeps a newer realtime edit when an older edit response finishes later', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const original = { id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Original', created_at: '2026-01-01T00:00:00Z', sequence: 1 }
+    let finishEdit!: (response: Response) => void
+    const pendingEdit = new Promise<Response>(resolve => { finishEdit = resolve })
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([{ id: 'c1', name: 'general', visibility: 'organisation', read_sequence: 1, latest_sequence: 1 }])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([original])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/messages/m1' && init?.method === 'PUT') return pendingEdit
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+    await wrapper.get('[data-testid=edit-message]').trigger('click')
+    await wrapper.get('[data-testid=message-edit-textarea]').setValue('Older edit')
+    void wrapper.get('[data-testid=message-edit-form]').trigger('submit')
+    await Promise.resolve()
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 3, payload: { ...original, body: 'Newer edit', edited_at: '2026-01-01T00:00:03Z' } }) } as MessageEvent)
+    finishEdit(await json({ ...original, body: 'Older edit', edited_at: '2026-01-01T00:00:02Z' }))
+    await flushPromises()
+
+    expect(wrapper.get('[data-message-id=m1]').text()).toContain('Newer edit')
+    expect(wrapper.get('[data-message-id=m1]').text()).not.toContain('Older edit')
+  })
+
+  it('applies a durably newer realtime edit over a conversation history response in flight', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const stale = { id: 'm2', conversation_id: 'c2', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Stale HTTP', created_at: '2026-01-01T00:00:00Z', edited_at: '2026-01-01T00:00:09Z', sequence: 2 }
+    let finishHistory!: (response: Response) => void
+    const pendingHistory = new Promise<Response>(resolve => { finishHistory = resolve })
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
+        { id: 'c1', name: 'first', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+        { id: 'c2', name: 'second', visibility: 'organisation', read_sequence: 2, latest_sequence: 2 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/conversations/c2/messages?limit=100') return pendingHistory
+      if (url === '/api/organisations/o1/users') return json([])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+    await conversationButton(wrapper, 'second').trigger('click')
+    await Promise.resolve()
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 7, payload: { ...stale, body: 'Realtime wins', edited_at: '2026-01-01T00:00:03Z' } }) } as MessageEvent)
+    finishHistory(await json([stale]))
+    await flushPromises()
+
+    expect(wrapper.get('[data-message-id=m2]').text()).toContain('Realtime wins')
+    expect(wrapper.get('[data-message-id=m2]').text()).not.toContain('Stale HTTP')
+  })
+
+  it('treats selected conversation history as authoritative over cached edits from before the request', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    const original = { id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Original', created_at: '2026-01-01T00:00:00Z', sequence: 1 }
+    const authoritative = { ...original, body: 'HTTP seq6', edited_at: '2026-01-01T00:00:06Z' }
+    let firstHistoryRequest = true
+    const fetcher = vi.fn((url: string) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') return json([
+        { id: 'c1', name: 'first', visibility: 'organisation', read_sequence: 1, latest_sequence: 1 },
+        { id: 'c2', name: 'second', visibility: 'organisation', read_sequence: 0, latest_sequence: 0 },
+      ])
+      if (url === '/api/conversations/c1/messages?limit=100') {
+        if (firstHistoryRequest) { firstHistoryRequest = false; return json([original]) }
+        return json([authoritative])
+      }
+      if (url === '/api/conversations/c2/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.updated', sequence: 5, payload: { ...original, body: 'Cached seq5', edited_at: '2026-01-01T00:00:05Z' } }) } as MessageEvent)
+    await wrapper.vm.$nextTick()
+    await conversationButton(wrapper, 'second').trigger('click')
+    await conversationButton(wrapper, 'first').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-message-id=m1]').text()).toContain('HTTP seq6')
+    expect(wrapper.get('[data-message-id=m1]').text()).not.toContain('Cached seq5')
+  })
+
 })
 
 function cssRule(selector: string) {

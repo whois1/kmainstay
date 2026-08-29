@@ -46,6 +46,9 @@ var conversationArchivesMigration string
 //go:embed migrations/010_attachment_positions.sql
 var attachmentPositionsMigration string
 
+//go:embed migrations/011_message_edits.sql
+var messageEditsMigration string
+
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -206,6 +209,23 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration 10: %w", err)
 		}
 		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(10,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=11`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		var messagingTableCount int
+		if err = tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','realtime_events')`).Scan(&messagingTableCount); err != nil {
+			return err
+		}
+		if messagingTableCount == 2 {
+			if _, err = tx.Exec(messageEditsMigration); err != nil {
+				return fmt.Errorf("migration 11: %w", err)
+			}
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(11,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return err
 		}
 	}
