@@ -7,7 +7,7 @@ import type { Conversation, User } from '../types'
 const styles = readFileSync('frontend/src/style.css', 'utf8')
 
 const conversations: Conversation[] = [
-  { id: 'pinned-old', name: 'General', visibility: 'organisation', latest_sequence: 2 },
+  { id: 'pinned-old', name: 'Everyone', visibility: 'organisation', is_everyone: true, latest_sequence: 2 },
   { id: 'pinned-new', name: 'Announcements', visibility: 'organisation', latest_sequence: 12 },
   { id: 'direct-old', name: 'direct:direct-old', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 4 },
   { id: 'direct-hector-new', name: 'K-Mainstay code', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 11 },
@@ -25,6 +25,24 @@ const users: User[] = [
 ]
 
 describe('WorkspaceSidebar', () => {
+  it('protects Everyone while keeping other organisation-wide conversations selectable', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    const checkboxes = wrapper.findAll('[data-testid=pinned-conversations] [data-testid=conversation-checkbox]')
+    expect(checkboxes).toHaveLength(1)
+    expect(checkboxes[0].attributes('aria-label')).toBe('Select Announcements')
+    expect(wrapper.get('[data-testid=pinned-conversations] .protected-conversation').text()).toContain('Everyone')
+  })
+
   it('keeps archived conversations out of active groups and exposes them separately', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
@@ -100,7 +118,7 @@ describe('WorkspaceSidebar', () => {
     expect(createButton.attributes('aria-label')).toBe('New group chat')
     expect(createButton.element.closest('section')).toBeNull()
     expect(wrapper.findAll('.sidebar-navigation h2').map(heading => heading.attributes('aria-label'))).toEqual(['Pinned', 'Direct messages', 'Group chats'])
-    expect(wrapper.findAll('[data-testid=pinned-conversations] button').map(button => button.text())).toEqual(['#Announcements', '#General'])
+    expect(wrapper.findAll('[data-testid=pinned-conversations] button').map(button => button.text())).toEqual(['#Announcements', '#Everyone'])
     expect(wrapper.findAll('[data-testid=direct-conversations] .direct-contact > .direct-contact-heading .conversation-label').map(label => label.text())).toEqual(['Hector', 'Mary', 'Alfred', 'Zoe'])
     expect(wrapper.findAll('[data-testid=direct-contact-hector] .direct-topic .conversation-label').map(label => label.text())).toEqual(['K-Mainstay code', 'General'])
     expect(wrapper.findAll('[data-testid=direct-contact-mary] .direct-topic .conversation-label').map(label => label.text())).toEqual(['Forecast review'])
@@ -159,12 +177,12 @@ describe('WorkspaceSidebar', () => {
     })
 
     const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
-    expect(checkboxes).toHaveLength(conversations.length)
+    expect(checkboxes).toHaveLength(conversations.filter(conversation => !conversation.is_everyone).length)
     await checkboxes[0].trigger('click')
     await checkboxes[2].trigger('click', { shiftKey: true })
 
     expect(checkboxes.map(checkbox => (checkbox.element as HTMLInputElement).checked)).toEqual([
-      true, true, true, false, false, false, false,
+      true, true, true, false, false, false,
     ])
     const actionBar = wrapper.get('[data-testid=bulk-conversation-actions]')
     expect(actionBar.text()).toContain('3 selected')
@@ -206,7 +224,25 @@ describe('WorkspaceSidebar', () => {
     await checkboxes[1].trigger('click')
     await wrapper.get('[data-testid=bulk-archive-conversations]').trigger('click')
 
-    expect(wrapper.emitted('archiveConversations')?.[0]).toEqual([[conversations[1], conversations[0]]])
+    expect(wrapper.emitted('archiveConversations')?.[0]).toEqual([[conversations[1], conversations[3]]])
+  })
+
+  it('keeps permanent bulk deletion unavailable when a direct chat is selected', async () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    await wrapper.get('[data-testid=direct-contact-hector] [data-testid=conversation-checkbox]').trigger('click')
+
+    expect(wrapper.get('[data-testid=bulk-archive-conversations]').text()).toBe('Archive')
+    expect(wrapper.find('[data-testid=bulk-delete-conversations]').exists()).toBe(false)
   })
 
   it('keeps conversation selectors compact beside their labels', () => {

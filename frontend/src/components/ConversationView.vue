@@ -24,6 +24,7 @@ const titleDraft = ref('')
 const editingMessageID = ref<string | null>(null)
 const messageEditDraft = ref('')
 const editingMessageVersion = ref<string | null | undefined>(undefined)
+const actionMenuOpen = ref(false)
 const isDraft = computed(() => props.selected?.id.startsWith('draft:') ?? false)
 const suggestions = computed(() => (props.users ?? []).filter(user => user.id !== props.currentUserID && user.name.toLocaleLowerCase().includes(mentionQuery.value.toLocaleLowerCase())))
 const pickerVisible = computed(() => pickerOpen.value && suggestions.value.length > 0)
@@ -100,6 +101,7 @@ watch(() => props.selected?.id, async () => {
   imageError.value = ''
   editingTitle.value = false
   editingMessageID.value = null
+  actionMenuOpen.value = false
   clearImages()
   await nextTick()
   if (isDraft.value) textarea.value?.focus()
@@ -134,6 +136,11 @@ function submitTitle() {
   if (!name) return
   emit('updateTitle', name)
   editingTitle.value = false
+}
+
+function deleteConversation() {
+  actionMenuOpen.value = false
+  emit('deleteConversation')
 }
 
 function selectImage(event: Event) {
@@ -360,7 +367,7 @@ function handleScroll() {
         <div v-else class="conversation-title-row"><h1>{{ directUser || removedDirectConversation ? '' : '# ' }}{{ conversationDisplayName }}</h1><button v-if="!removedDirectConversation && !isDraft && !selected.is_everyone" data-testid="edit-conversation-title" class="title-edit" type="button" aria-label="Edit conversation title" :disabled="titleBusy" @click="beginTitleEdit">{{ titleBusy ? 'Saving…' : 'Edit' }}</button></div>
         <p>{{ conversationContext }}</p>
       </div>
-      <div v-if="!isDraft && !selected.is_everyone" class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation && !selected.archived" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="selected.archived" data-testid="restore-conversation" class="secondary" :disabled="busy" @click="$emit('restoreConversation')">Restore</button><button v-else data-testid="archive-conversation" class="secondary" :disabled="busy" @click="$emit('archiveConversation')">Archive</button><button v-if="canDelete" data-testid="delete-conversation" class="danger-outline" :disabled="busy" aria-label="Delete conversation" @click="$emit('deleteConversation')"><span class="delete-label">Delete conversation</span><span class="delete-icon" aria-hidden="true">Delete</span></button></div>
+      <div v-if="!isDraft && !selected.is_everyone" class="conversation-header-actions"><button v-if="selected.visibility === 'members' && !removedDirectConversation && !selected.archived" data-testid="new-topic" class="secondary" aria-label="New chat with the same people" title="New chat with the same people" @click="$emit('newTopic')">＋ New chat</button><button v-if="selected.archived" data-testid="restore-conversation" class="secondary" :disabled="busy" @click="$emit('restoreConversation')">Restore</button><button v-else data-testid="archive-conversation" class="secondary" :disabled="busy" @click="$emit('archiveConversation')">Archive</button><div v-if="canDelete" class="conversation-action-menu"><button data-testid="conversation-actions-menu" class="secondary action-menu-trigger" type="button" aria-label="More conversation actions" aria-controls="conversation-action-menu" :aria-expanded="actionMenuOpen" @click="actionMenuOpen = !actionMenuOpen">•••</button><div v-if="actionMenuOpen" id="conversation-action-menu" class="action-menu"><button data-testid="delete-conversation" class="danger-outline" :disabled="busy" @click="deleteConversation">Delete for everyone</button></div></div></div>
     </header>
     <div v-else class="empty-state"><h1>No conversations</h1><p>Create one from the conversations list.</p></div>
     <div class="message-list-shell">

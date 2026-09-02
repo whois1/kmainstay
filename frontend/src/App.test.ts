@@ -101,13 +101,14 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('section[data-testid=settings-page][aria-label="Organisation settings"]')).toBeTruthy()
   })
 
-  it('gives the compact delete control a complete accessible name', async () => {
+  it('does not expose Everyone lifecycle mutations', async () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(loadedFetcher()), socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    const deleteButton = wrapper.get('[data-testid=delete-conversation]')
-    expect(deleteButton.attributes('aria-label')).toBe('Delete conversation')
-    expect(deleteButton.get('[aria-hidden=true]').text()).toBe('Delete')
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=pinned-conversations] [data-testid=conversation-checkbox]').exists()).toBe(false)
   })
 
   it('contains modal focus, closes with Escape and restores the opener', async () => {
@@ -128,7 +129,7 @@ describe('K-Mainstay UI', () => {
     const lastCheckbox = wrapper.findAll('[data-testid=create-conversation] input[type=checkbox]').at(-1)!
     ;(lastCheckbox.element as HTMLElement).focus()
     await dialog.trigger('keydown', { key: 'Tab' })
-    expect(document.activeElement).toBe(wrapper.get('[data-testid=create-conversation] .close').element)
+    expect(document.activeElement).toBe(wrapper.get('[data-testid=close-conversation-dialog]').element)
 
     await dialog.trigger('keydown', { key: 'Escape' })
     await flushPromises()
@@ -1506,7 +1507,7 @@ describe('K-Mainstay UI', () => {
       .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
       .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
       .mockImplementationOnce(() => json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
+        { id: 'c1', name: 'announcements', visibility: 'organisation' },
         { id: 'c2', name: 'planning', visibility: 'organisation' },
       ]))
       .mockImplementationOnce(() => json([]))
@@ -1516,12 +1517,13 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
+    await wrapper.get('[data-testid=conversation-actions-menu]').trigger('click')
     await wrapper.get('[data-testid=delete-conversation]').trigger('click')
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledWith('Delete #general? This removes its messages and nobody will be able to send to it.')
+    expect(confirm).toHaveBeenCalledWith('Delete #announcements for everyone? This permanently removes all messages in this conversation.')
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations/c1', expect.objectContaining({ method: 'DELETE' }))
-    expect(wrapper.findAll('nav button').some(button => button.text().includes('general'))).toBe(false)
+    expect(wrapper.findAll('nav button').some(button => button.text().includes('announcements'))).toBe(false)
     expect(wrapper.get('h1').text()).toBe('# planning')
     confirm.mockRestore()
   })
@@ -1585,7 +1587,7 @@ describe('K-Mainstay UI', () => {
     confirm.mockRestore()
   })
 
-  it('names the topic and other user when confirming direct-conversation deletion', async () => {
+  it('does not offer permanent deletion for a direct conversation', async () => {
     const fetcher = vi.fn((url: string) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
@@ -1601,9 +1603,8 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
-
-    expect(confirm).toHaveBeenCalledWith('Delete "Forecast review" with Hector? This removes its messages and nobody will be able to send to it.')
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(confirm).not.toHaveBeenCalled()
     confirm.mockRestore()
   })
 
@@ -1627,18 +1628,23 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('[data-testid=composer] textarea').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid=composer] textarea').attributes('placeholder')).toBe('Conversation unavailable')
 
-    await wrapper.get('[data-testid=delete-conversation]').trigger('click')
-    expect(confirm).toHaveBeenCalledWith('Delete conversation with Removed user? This removes its messages and nobody will be able to send to it.')
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
+    expect(confirm).not.toHaveBeenCalled()
     confirm.mockRestore()
   })
 
   it('shows a clear empty state after deleting the last conversation', async () => {
-    const fetcher = loadedFetcher()
-    fetcher.mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
+    const fetcher = vi.fn()
+      .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
+      .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
+      .mockImplementationOnce(() => json([{ id: 'c1', name: 'Planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'] }]))
+      .mockImplementationOnce(() => json([]))
+      .mockImplementationOnce(() => Promise.resolve(new Response(null, { status: 204 })))
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(App, { global: { provide: { fetcher: withInitialUsers(fetcher), socketFactory: class { close() {} } } } })
     await flushPromises()
 
+    await wrapper.get('[data-testid=conversation-actions-menu]').trigger('click')
     await wrapper.get('[data-testid=delete-conversation]').trigger('click')
     await flushPromises()
 
@@ -2267,7 +2273,7 @@ function loadedFetcher() {
   return vi.fn()
     .mockImplementationOnce(() => json({ id: 'u1', name: 'Michael', kind: 'human' }))
     .mockImplementationOnce(() => json([{ id: 'o1', name: 'Mainstay', role: 'admin' }]))
-    .mockImplementationOnce(() => json([{ id: 'c1', name: 'general', visibility: 'organisation' }]))
+    .mockImplementationOnce(() => json([{ id: 'c1', name: 'Everyone', visibility: 'organisation', is_everyone: true }]))
     .mockImplementationOnce(() => json([]))
 }
 

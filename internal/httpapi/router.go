@@ -365,7 +365,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": in.Name, "visibility": in.Visibility, "is_everyone": false, "member_ids": returnedMemberIDs, "activity_at": now, "title_automatic": in.AutomaticTitle})
 }
 
 func (s *server) conversationByInternalName(ctx context.Context, organisationID, internalName string) (map[string]any, error) {
@@ -534,6 +534,10 @@ func (s *server) restoreConversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	if s.accessibleEveryoneConversation(r.Context(), conversationID, principal.ID) {
+		writeError(w, http.StatusConflict, "Everyone cannot be changed")
+		return
+	}
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM conversation_archives WHERE user_id=? AND conversation_id=?`, principal.ID, conversationID); err != nil {
 		returnServerError(w)
 		return
@@ -551,21 +555,29 @@ func (s *server) accessibleEveryoneConversation(ctx context.Context, conversatio
 }
 
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
-	if current(r).Kind != "human" {
+	organisationID := r.PathValue("organisation")
+	if current(r).Kind != "human" || s.organisationRole(r.Context(), organisationID, current(r).ID) != "admin" {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	var visibility string
 	var isEveryone bool
-	if err := s.db.QueryRowContext(r.Context(), `SELECT EXISTS(
-		SELECT 1 FROM conversations conversation
-		JOIN organisation_memberships membership ON membership.organisation_id=conversation.organisation_id
-		WHERE conversation.id=? AND conversation.organisation_id=? AND conversation.is_everyone=1
-		AND membership.user_id=? AND membership.role='admin')`, r.PathValue("conversation"), r.PathValue("organisation"), current(r).ID).Scan(&isEveryone); err != nil {
+	var memberCount int
+	err := s.db.QueryRowContext(r.Context(), `SELECT conversation.visibility,conversation.is_everyone,COUNT(member.user_id)
+		FROM conversations conversation
+		LEFT JOIN conversation_members member ON member.conversation_id=conversation.id
+		WHERE conversation.id=? AND conversation.organisation_id=?
+		GROUP BY conversation.id`, r.PathValue("conversation"), organisationID).Scan(&visibility, &isEveryone, &memberCount)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		returnServerError(w)
 		return
 	}
 	if isEveryone {
 		writeError(w, http.StatusConflict, "Everyone cannot be changed")
+		return
+	}
+	if visibility == "members" && memberCount > 0 && memberCount < 3 {
+		writeError(w, http.StatusConflict, "direct conversations cannot be deleted for everyone")
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -600,8 +612,9 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	result, err := tx.ExecContext(r.Context(), `DELETE FROM conversations
 		WHERE id=? AND organisation_id=?
 		AND EXISTS(SELECT 1 FROM organisation_memberships
-			WHERE organisation_id=? AND user_id=? AND role='admin')`,
-		r.PathValue("conversation"), r.PathValue("organisation"), r.PathValue("organisation"), current(r).ID)
+			WHERE organisation_id=? AND user_id=? AND role='admin')
+		AND (conversations.visibility='organisation' OR (SELECT COUNT(*) FROM conversation_members WHERE conversation_id=conversations.id) >= 3)`,
+		r.PathValue("conversation"), organisationID, organisationID, current(r).ID)
 	if err != nil {
 		returnServerError(w)
 		return

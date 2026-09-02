@@ -105,6 +105,8 @@ const selectableConversations = computed(() => [
   ...groupConversationThreads.value.flatMap(thread => thread.topics),
   ...archivedConversations.value,
 ].filter(conversation => !conversation.is_everyone))
+const selectedConversations = computed(() => selectableConversations.value.filter(conversation => selectedConversationIDs.value.has(conversation.id)))
+const canDeleteSelectedConversations = computed(() => selectedConversations.value.length > 0 && selectedConversations.value.every(conversation => conversation.visibility === 'organisation' || (conversation.member_ids?.length ?? 0) >= 3))
 
 function selectConversationCheckbox(event: MouseEvent, conversation: Conversation) {
   const checkbox = event.currentTarget as HTMLInputElement
@@ -129,9 +131,8 @@ function archiveSelectedConversations() {
 }
 
 function deleteSelectedConversations() {
-  const selectedConversations = selectableConversations.value.filter(conversation => selectedConversationIDs.value.has(conversation.id))
-  if (!selectedConversations.length) return
-  emit('deleteConversations', selectedConversations)
+  if (!canDeleteSelectedConversations.value) return
+  emit('deleteConversations', selectedConversations.value)
 }
 
 watch(() => props.conversations.map(conversation => conversation.id), conversationIDs => {
@@ -163,7 +164,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
     <nav class="sidebar-navigation" aria-label="Conversations">
       <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
         <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
-        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation">
+        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation" :class="{ 'protected-conversation': conversation.is_everyone }">
           <input v-if="!conversation.is_everyone" data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
@@ -224,7 +225,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
     <div v-if="selectedConversationIDs.size" data-testid="bulk-conversation-actions" class="bulk-conversation-actions" aria-live="polite">
       <span>{{ selectedConversationIDs.size }} selected</span>
       <button data-testid="bulk-archive-conversations" :disabled="busy" @click="archiveSelectedConversations">Archive</button>
-      <button v-if="organisation?.role === 'admin'" data-testid="bulk-delete-conversations" class="danger-outline" :disabled="busy" @click="deleteSelectedConversations">Delete</button>
+      <button v-if="organisation?.role === 'admin' && canDeleteSelectedConversations" data-testid="bulk-delete-conversations" class="danger-outline" :disabled="busy" @click="deleteSelectedConversations">Delete</button>
     </div>
     <div class="profile"><span>{{ principal.name.slice(0, 1) }}</span><div><strong>{{ principal.name }}</strong><small>Human</small></div></div>
   </aside>
