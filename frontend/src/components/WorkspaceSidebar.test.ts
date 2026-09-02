@@ -7,7 +7,7 @@ import type { Conversation, User } from '../types'
 const styles = readFileSync('frontend/src/style.css', 'utf8')
 
 const conversations: Conversation[] = [
-  { id: 'pinned-old', name: 'General', visibility: 'organisation', is_everyone: true, latest_sequence: 2 },
+  { id: 'pinned-old', name: 'Everyone', visibility: 'organisation', is_everyone: true, latest_sequence: 2 },
   { id: 'pinned-new', name: 'Announcements', visibility: 'organisation', latest_sequence: 12 },
   { id: 'direct-old', name: 'direct:direct-old', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 4 },
   { id: 'direct-hector-new', name: 'K-Mainstay code', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 11 },
@@ -25,7 +25,7 @@ const users: User[] = [
 ]
 
 describe('WorkspaceSidebar', () => {
-  it('protects General while keeping other organisation-wide conversations selectable', () => {
+  it('protects Everyone while keeping other organisation-wide conversations selectable', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
         organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
@@ -40,6 +40,7 @@ describe('WorkspaceSidebar', () => {
     const checkboxes = wrapper.findAll('[data-testid=pinned-conversations] [data-testid=conversation-checkbox]')
     expect(checkboxes).toHaveLength(1)
     expect(checkboxes[0].attributes('aria-label')).toBe('Select Announcements')
+    expect(wrapper.get('[data-testid=pinned-conversations] .protected-conversation').text()).toContain('Everyone')
   })
 
   it('keeps archived conversations out of active groups and exposes them separately', () => {
@@ -117,7 +118,7 @@ describe('WorkspaceSidebar', () => {
     expect(createButton.attributes('aria-label')).toBe('New group chat')
     expect(createButton.element.closest('section')).toBeNull()
     expect(wrapper.findAll('.sidebar-navigation h2').map(heading => heading.attributes('aria-label'))).toEqual(['Pinned', 'Direct messages', 'Group chats'])
-    expect(wrapper.findAll('[data-testid=pinned-conversations] button').map(button => button.text())).toEqual(['#Announcements', '#General'])
+    expect(wrapper.findAll('[data-testid=pinned-conversations] button').map(button => button.text())).toEqual(['#Announcements', '#Everyone'])
     expect(wrapper.findAll('[data-testid=direct-conversations] .direct-contact > .direct-contact-heading .conversation-label').map(label => label.text())).toEqual(['Hector', 'Mary', 'Alfred', 'Zoe'])
     expect(wrapper.findAll('[data-testid=direct-contact-hector] .direct-topic .conversation-label').map(label => label.text())).toEqual(['K-Mainstay code', 'General'])
     expect(wrapper.findAll('[data-testid=direct-contact-mary] .direct-topic .conversation-label').map(label => label.text())).toEqual(['Forecast review'])

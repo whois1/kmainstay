@@ -164,7 +164,7 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
     <nav class="sidebar-navigation" aria-label="Conversations">
       <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
         <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
-        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation">
+        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation" :class="{ 'protected-conversation': conversation.is_everyone }">
           <input v-if="!conversation.is_everyone" data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>

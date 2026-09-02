@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import ConversationView from './ConversationView.vue'
 import type { Conversation, Message, User } from '../types'
 
-const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', is_everyone: true, read_sequence: 1 }
+const conversation: Conversation = { id: 'conversation', name: 'Everyone', visibility: 'organisation', is_everyone: true, read_sequence: 1 }
 const groupConversation: Conversation = { id: 'group', name: 'Planning', visibility: 'members', member_ids: ['reader', 'hector', 'mary'], read_sequence: 1 }
 const messages: Message[] = [
   { id: 'first', conversation_id: 'conversation', author_id: 'reader', author_name: 'Reader', author_kind: 'human', body: 'Read', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
@@ -74,11 +74,13 @@ describe('ConversationView', () => {
   })
 
   it('does not offer mutations for Everyone', () => {
-    const wrapper = mount(ConversationView, { props: { selected: { ...conversation, name: 'Everyone', is_everyone: true }, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: true } })
 
     expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=restore-conversation]').exists()).toBe(false)
     expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
   })
 
   it('lets the user edit the conversation title inline', async () => {
@@ -92,14 +94,6 @@ describe('ConversationView', () => {
     expect(wrapper.emitted('updateTitle')).toEqual([['Better title']])
   })
 
-  it('keeps General visible and removes its lifecycle mutations', () => {
-    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [], composer: '', busy: false, error: '', canDelete: true } })
-
-    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid=restore-conversation]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid=conversation-actions-menu]').exists()).toBe(false)
-  })
 
   it('keeps other organisation-wide conversations mutable', () => {
     const wrapper = mount(ConversationView, { props: { selected: { id: 'announcements', name: 'Announcements', visibility: 'organisation' }, messages: [], composer: '', busy: false, error: '', canDelete: true } })

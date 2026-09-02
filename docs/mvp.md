@@ -41,7 +41,7 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - admin-only bot creation and API-key rotation/revocation;
 - organisation-wide named conversations;
 - private conversations with one or more selected users;
-- permanent organisation-wide General, personally archivable direct chats, and admin-only global deletion of other user-created conversations;
+- permanent organisation-wide `Everyone`, personally archivable direct chats, and admin-only global deletion of other user-created conversations;
 - chronological messages;
 - author-only inline editing of message text and image captions, with an Edited marker and durable human-client replay;
 - safe Markdown rendering, including code blocks;
