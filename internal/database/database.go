@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
@@ -48,6 +49,12 @@ var attachmentPositionsMigration string
 
 //go:embed migrations/011_message_edits.sql
 var messageEditsMigration string
+
+//go:embed migrations/012_conversation_names.sql
+var conversationNamesMigration string
+
+//go:embed migrations/013_everyone_conversation.sql
+var everyoneConversationMigration string
 
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
@@ -229,7 +236,142 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=12`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(conversationNamesMigration); err != nil {
+			return fmt.Errorf("migration 12: %w", err)
+		}
+		if err = migrateConversationNames(tx); err != nil {
+			return fmt.Errorf("migration 12 names: %w", err)
+		}
+		if _, err = tx.Exec(`CREATE UNIQUE INDEX conversations_visible_name_unique ON conversations(organisation_id,name_normalized) WHERE name_normalized IS NOT NULL`); err != nil {
+			return fmt.Errorf("migration 12 index: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(12,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=13`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err = tx.Exec(everyoneConversationMigration); err != nil {
+			return fmt.Errorf("migration 13: %w", err)
+		}
+		if err = migrateEveryoneConversations(tx); err != nil {
+			return fmt.Errorf("migration 13 everyone conversations: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(13,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+func migrateEveryoneConversations(tx *sql.Tx) error {
+	var nameColumns int
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('conversations') WHERE name='name'`).Scan(&nameColumns); err != nil || nameColumns == 0 {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id,organisation_id FROM conversations WHERE name='general' AND visibility='organisation' ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	type everyoneConversation struct{ id, organisationID string }
+	var conversations []everyoneConversation
+	for rows.Next() {
+		var conversation everyoneConversation
+		if err := rows.Scan(&conversation.id, &conversation.organisationID); err != nil {
+			rows.Close()
+			return err
+		}
+		conversations = append(conversations, conversation)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, conversation := range conversations {
+		var conflictingID, conflictingTitle string
+		err := tx.QueryRow(`SELECT id,coalesce(title,name) FROM conversations WHERE organisation_id=? AND id<>? AND name_normalized=? LIMIT 1`, conversation.organisationID, conversation.id, NormalizeConversationName("Everyone")).Scan(&conflictingID, &conflictingTitle)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			base := strings.TrimSpace(conflictingTitle)
+			for suffix := 2; ; suffix++ {
+				candidate := fmt.Sprintf("%s %d", base, suffix)
+				result, updateErr := tx.Exec(`UPDATE OR IGNORE conversations SET title=?,name_normalized=? WHERE id=?`, candidate, NormalizeConversationName(candidate), conflictingID)
+				if updateErr != nil {
+					return updateErr
+				}
+				if affected, _ := result.RowsAffected(); affected == 1 {
+					break
+				}
+			}
+		}
+		if _, err := tx.Exec(`UPDATE conversations SET name=?,title='Everyone',name_normalized=?,title_automatic=0,is_everyone=1 WHERE id=?`, "everyone:"+conversation.id, NormalizeConversationName("Everyone"), conversation.id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM conversation_archives WHERE conversation_id=?`, conversation.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateConversationNames(tx *sql.Tx) error {
+	var titleColumns, nameColumns int
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('conversations') WHERE name='title'`).Scan(&titleColumns); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('conversations') WHERE name='name'`).Scan(&nameColumns); err != nil {
+		return err
+	}
+	if titleColumns == 0 || nameColumns == 0 {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT id,organisation_id,coalesce(title,name),created_at FROM conversations ORDER BY organisation_id,created_at,id`)
+	if err != nil {
+		return err
+	}
+	type conversationName struct{ id, organisationID, title string }
+	var conversations []conversationName
+	for rows.Next() {
+		var conversation conversationName
+		var createdAt string
+		if err := rows.Scan(&conversation.id, &conversation.organisationID, &conversation.title, &createdAt); err != nil {
+			rows.Close()
+			return err
+		}
+		conversations = append(conversations, conversation)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	usedNames := map[string]map[string]bool{}
+	for _, conversation := range conversations {
+		base := strings.TrimSpace(conversation.title)
+		if base == "" {
+			base = "Conversation"
+		}
+		candidate := base
+		if usedNames[conversation.organisationID] == nil {
+			usedNames[conversation.organisationID] = map[string]bool{}
+		}
+		for suffix := 2; usedNames[conversation.organisationID][NormalizeConversationName(candidate)]; suffix++ {
+			candidate = fmt.Sprintf("%s %d", base, suffix)
+		}
+		normalized := NormalizeConversationName(candidate)
+		usedNames[conversation.organisationID][normalized] = true
+		if _, err := tx.Exec(`UPDATE conversations SET title=?,name_normalized=? WHERE id=?`, candidate, normalized, conversation.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type legacyMembership struct {
@@ -478,6 +620,10 @@ func CanonicalName(name string) string {
 
 func NormalizeName(name string) string {
 	return strings.ToLower(CanonicalName(name))
+}
+
+func NormalizeConversationName(name string) string {
+	return norm.NFC.String(cases.Fold().String(CanonicalName(name)))
 }
 
 func NewID(prefix string) string {

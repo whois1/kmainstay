@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BaseDialog from './components/BaseDialog.vue'
 import ConversationView from './components/ConversationView.vue'
 import OrganisationSettings from './components/OrganisationSettings.vue'
@@ -51,6 +51,7 @@ const eligibleEmail = ref('')
 const selectedEligibleUserID = ref('')
 const showAddExisting = ref(false)
 const memberIDs = ref<string[]>([])
+const conversationNameEdited = ref(false)
 let conversationRefreshGeneration = 0
 let conversationSelectionGeneration = 0
 let navigationIntentGeneration = 0
@@ -63,6 +64,7 @@ type HistoryLoad = { conversationID: string; generationBeforeRequest: number }
 const historyLoadsByConversationID = new Map<string, Set<HistoryLoad>>()
 const pendingLocalEditConversationIDsByMessageID = new Map<string, string>()
 const pendingDirectUserIDs = new Set<string>()
+const pendingAutomaticTitleConversationIDs = new Set<string>()
 const archiveStateGenerations = new Map<string, number>()
 const activities = ref<Record<string, ConversationActivity>>({})
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -107,6 +109,7 @@ const realtime = useRealtime((message) => {
     conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
     conversation.activity_at = message.created_at
     if (conversation.title_automatic && message.body.trim()) {
+      void reconcileAutomaticConversationTitle(conversation.id)
       conversation.name = message.body.trim()
       conversation.title_automatic = false
     }
@@ -380,6 +383,7 @@ async function sendMessage() {
       selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
       selected.value!.activity_at = message.created_at
       if (selected.value!.title_automatic && message.body.trim()) {
+        void reconcileAutomaticConversationTitle(selected.value!.id)
         selected.value!.name = message.body.trim()
         selected.value!.title_automatic = false
       }
@@ -549,9 +553,16 @@ async function openConversationDialog() {
   users.value = conversationUsers
   beginConversationDialog()
   conversationName.value = ''
+  conversationNameEdited.value = false
   memberIDs.value = []
   showConversation.value = true
 }
+
+watch(memberIDs, selectedMemberIDs => {
+  if (conversationNameEdited.value) return
+  const selectedMemberIDSet = new Set(selectedMemberIDs)
+  conversationName.value = users.value.filter(user => selectedMemberIDSet.has(user.id)).map(user => user.name).join(', ')
+})
 
 function openDirectTopicDialog(user: User) {
   navigationIntentGeneration++
@@ -775,6 +786,16 @@ async function reconcileDeletedConversation(conversationID: string) {
   await refreshConversations()
 }
 
+async function reconcileAutomaticConversationTitle(conversationID: string) {
+  if (pendingAutomaticTitleConversationIDs.has(conversationID)) return
+  pendingAutomaticTitleConversationIDs.add(conversationID)
+  try {
+    await refreshConversations()
+  } finally {
+    pendingAutomaticTitleConversationIDs.delete(conversationID)
+  }
+}
+
 async function refreshConversations() {
   if (!organisation.value) return
   const refreshGeneration = ++conversationRefreshGeneration
@@ -854,6 +875,6 @@ onBeforeUnmount(() => {
   </BaseDialog>
 
   <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="closeConversationDialog">
-    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">New group chat</p><h2 id="conversation-dialog-title">Create group chat</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required placeholder="e.g. Planning"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < 2">{{ creatingConversation ? 'Creating…' : 'Create group chat' }}</button></form>
+    <form data-testid="create-conversation" @submit.prevent="createConversation"><button type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button><p class="dialog-context">New group chat</p><h2 id="conversation-dialog-title">Create group chat</h2><label>Name<input data-testid="conversation-name" v-model="conversationName" data-dialog-initial-focus required placeholder="e.g. Planning" @input="conversationNameEdited = true"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < 2">{{ creatingConversation ? 'Creating…' : 'Create group chat' }}</button></form>
   </BaseDialog>
 </template>

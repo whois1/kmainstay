@@ -28,7 +28,7 @@ Create workspace
 → Name: Hector
 → Copy workspace-issued token
 → Paste token into Hermes
-→ Hector joined #general
+→ Hector joined #Everyone
 ```
 
 The initial position should be concrete:
@@ -96,7 +96,7 @@ Phase 1 should support:
 1. Sign up and create a workspace.
 2. Add an agent named Hector.
 3. Copy its token into Hermes.
-4. Hector appears in `#general` in under one minute.
+4. Hector appears in `#Everyone` in under one minute.
 5. Ask Hector to inspect a repository and diagnose failing tests.
 6. Watch meaningful activity as Hector reads files, runs tests, investigates, and changes code.
 7. Receive the result.

@@ -56,7 +56,7 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	var conversations []map[string]any
 	response := recorder.Result()
 	decodeResponse(t, response, http.StatusOK, &conversations)
-	if len(conversations) != 1 || conversations[0]["id"] != boot.ConversationID || conversations[0]["read_sequence"] != float64(0) || conversations[0]["latest_sequence"] != float64(0) {
+	if len(conversations) != 1 || conversations[0]["id"] != boot.ConversationID || conversations[0]["name"] != "Everyone" || conversations[0]["is_everyone"] != true || conversations[0]["read_sequence"] != float64(0) || conversations[0]["latest_sequence"] != float64(0) {
 		t.Fatalf("conversations = %#v", conversations)
 	}
 }
@@ -75,13 +75,16 @@ func TestMessageEdit_OwnMessageUpdatesBodyAndHistoryWithoutChangingCreationState
 	defer server.Close()
 	client := newCookieClient(t)
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
-	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var conversation map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Editing", "visibility": "organisation"}), http.StatusCreated, &conversation)
+	conversationID := conversation["id"].(string)
+	endpoint := server.URL + "/api/conversations/" + conversationID + "/messages"
 	var created map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Before", "client_id": "stable"}), http.StatusCreated, &created)
-	if _, err = db.Exec(`UPDATE conversations SET title='Pinned title',title_automatic=1 WHERE id=?`, boot.ConversationID); err != nil {
+	if _, err = db.Exec(`UPDATE conversations SET title='Pinned title',title_automatic=1 WHERE id=?`, conversationID); err != nil {
 		t.Fatal(err)
 	}
-	archiveResponse := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+boot.ConversationID+"/archive", server.URL, "", map[string]any{})
+	archiveResponse := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+conversationID+"/archive", server.URL, "", map[string]any{})
 	if archiveResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("archive status = %d: %s", archiveResponse.StatusCode, readBody(archiveResponse))
 	}
@@ -499,6 +502,9 @@ func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
 	defer server.Close()
 	client := newCookieClient(t)
@@ -532,6 +538,40 @@ func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
 	}
 }
 
+func TestEveryoneConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "everyone-protection.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	requests := []struct {
+		method   string
+		endpoint string
+		body     map[string]any
+	}{
+		{http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/title", map[string]any{"name": "Renamed"}},
+		{http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/archive", nil},
+		{http.MethodDelete, server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + boot.ConversationID, nil},
+	}
+	for _, mutation := range requests {
+		response := requestJSON(t, client, mutation.method, mutation.endpoint, server.URL, "", mutation.body)
+		body := readBody(response)
+		response.Body.Close()
+		if response.StatusCode != http.StatusConflict || !strings.Contains(body, "Everyone cannot be changed") {
+			t.Fatalf("%s %s status = %d body=%s", mutation.method, mutation.endpoint, response.StatusCode, body)
+		}
+	}
+}
+
 func TestConversationTitlesAndLatestActivity(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-titles.db"))
 	if err != nil {
@@ -558,7 +598,7 @@ func TestConversationTitlesAndLatestActivity(t *testing.T) {
 		return conversation
 	}
 	older := createTopic("New Hector session")
-	newer := createTopic("New Hector session")
+	newer := createTopic("Another Hector session")
 
 	var conversations []map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &conversations)
@@ -629,6 +669,191 @@ func TestConversationCreation_IsIdempotentForClientID(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("automatic conversation count = %d, want 1", count)
+	}
+}
+
+func TestAutomaticPlaceholderCollision_UsesUniqueVisibleNameAndPreservesIdempotency(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "automatic-placeholder-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "New Hector session", "visibility": "organisation"}), http.StatusCreated, &map[string]any{})
+	payload := map[string]any{"name": "New Hector session", "visibility": "organisation", "automatic_title": true, "client_id": "stable-placeholder-create"}
+
+	var created, retry map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", payload), http.StatusCreated, &created)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", payload), http.StatusOK, &retry)
+	if created["name"] != "New Hector session 2" {
+		t.Fatalf("automatic placeholder = %q, want unique visible name", created["name"])
+	}
+	if retry["id"] != created["id"] || retry["name"] != created["name"] {
+		t.Fatalf("retry conversation = %#v, want same conversation as %#v", retry, created)
+	}
+}
+
+func TestAutomaticConversationCreation_ConcurrentRequestsUseUniqueVisibleNames(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "concurrent-automatic-conversations.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	blocker, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineWaitCount := db.Stats().WaitCount
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	payload, err := json.Marshal(map[string]any{"name": "New topic", "visibility": "organisation", "automatic_title": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			request, requestErr := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+			if requestErr != nil {
+				results <- result{err: requestErr}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", server.URL)
+			response, requestErr := client.Do(request)
+			results <- result{response: response, err: requestErr}
+		}()
+	}
+	close(start)
+	deadline := time.Now().Add(3 * time.Second)
+	for db.Stats().WaitCount < baselineWaitCount+2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if db.Stats().WaitCount < baselineWaitCount+2 {
+		_ = blocker.Rollback()
+		t.Fatal("concurrent create requests did not both reach the single database connection")
+	}
+	if err := blocker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	names := map[string]int{}
+	for range 2 {
+		created := <-results
+		if created.err != nil {
+			t.Fatal(created.err)
+		}
+		var conversation map[string]any
+		decodeResponse(t, created.response, http.StatusCreated, &conversation)
+		names[conversation["name"].(string)]++
+	}
+	if names["New topic"] != 1 || names["New topic 2"] != 1 {
+		t.Fatalf("concurrent automatic conversation names = %#v", names)
+	}
+}
+
+func TestAutomaticConversationTitle_RemainsUnique(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "automatic-title-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &map[string]any{})
+	var automatic map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "New topic", "visibility": "organisation", "member_ids": []string{}, "automatic_title": true}), http.StatusCreated, &automatic)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+automatic["id"].(string)+"/messages", server.URL, "", map[string]any{"body": " Straße ", "client_id": "first"}), http.StatusCreated, &map[string]any{})
+
+	var conversations []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, endpoint, server.URL, "", nil), http.StatusOK, &conversations)
+	var automaticTitle string
+	for _, conversation := range conversations {
+		if conversation["id"] == automatic["id"] {
+			automaticTitle = conversation["name"].(string)
+		}
+	}
+	if automaticTitle != "Straße 2" {
+		t.Fatalf("automatic title = %q, want unique suffix", automaticTitle)
+	}
+}
+
+func TestCreateConversation_RejectsNormalisedVisibleNameConflict(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-name-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "Straße", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &map[string]any{})
+
+	conflict := requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}})
+	defer conflict.Body.Close()
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(readBody(conflict), "conversation name already exists") {
+		t.Fatalf("conflict status = %d, want 409 with clear message", conflict.StatusCode)
+	}
+}
+
+func TestRenameConversation_RejectsNormalisedVisibleNameConflict(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-rename-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	var first, second map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &first)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "Other", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &second)
+
+	conflict := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+second["id"].(string)+"/title", server.URL, "", map[string]any{"name": "Straße"})
+	defer conflict.Body.Close()
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(readBody(conflict), "conversation name already exists") {
+		t.Fatalf("conflict status = %d, want 409 with clear message", conflict.StatusCode)
 	}
 }
 
@@ -1497,6 +1722,9 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
+		t.Fatal(err)
+	}
 	uploadRoot := filepath.Join(t.TempDir(), "uploads")
 	store, err := attachments.NewFilesystem(uploadRoot)
 	if err != nil {
@@ -1854,6 +2082,9 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	defer db.Close()
 	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
 		t.Fatal(err)
 	}
 	var passwordHash string

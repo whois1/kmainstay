@@ -300,6 +300,52 @@ describe('K-Mainstay UI', () => {
     vi.useRealTimers()
   })
 
+  it('reconciles a suffixed automatic title once when send and realtime deliver the first message', async () => {
+    class EventSocket {
+      static instance: EventSocket
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onclose: (() => void) | null = null
+      close() {}
+      constructor() { EventSocket.instance = this }
+    }
+    let finishSend!: (response: Response) => void
+    let finishTitleRefresh!: (response: Response) => void
+    const sendResponse = new Promise<Response>(resolve => { finishSend = resolve })
+    const titleRefresh = new Promise<Response>(resolve => { finishTitleRefresh = resolve })
+    let conversationLoads = 0
+    const firstMessage = { id: 'm1', conversation_id: 'c1', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Straße', created_at: '2026-08-27T12:00:00Z', sequence: 1 }
+    const fetcher = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
+      if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true') {
+        conversationLoads++
+        if (conversationLoads === 1) return json([{ id: 'c1', name: 'New topic', visibility: 'organisation', title_automatic: true, latest_sequence: 0 }])
+        return titleRefresh
+      }
+      if (url === '/api/conversations/c1/messages?limit=100') return json([])
+      if (url === '/api/organisations/o1/users') return json([])
+      if (url === '/api/conversations/c1/messages' && init?.method === 'POST') return sendResponse
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: EventSocket } } })
+    await flushPromises()
+
+    await wrapper.get('textarea').setValue('Straße')
+    void wrapper.get('[data-testid=composer]').trigger('submit')
+    await Promise.resolve()
+    EventSocket.instance.onmessage?.({ data: JSON.stringify({ type: 'message.created', sequence: 1, payload: firstMessage }) } as MessageEvent)
+    await Promise.resolve()
+    finishSend(await json(firstMessage, 201))
+    await flushPromises()
+    finishTitleRefresh(await json([{ id: 'c1', name: 'Straße 2', visibility: 'organisation', title_automatic: false, latest_sequence: 1 }]))
+    await flushPromises()
+
+    expect(conversationLoads).toBe(2)
+    expect(wrapper.get('h1').text()).toBe('# Straße 2')
+    expect(wrapper.findAll('[data-testid=message]')).toHaveLength(1)
+  })
+
   it('uses the fetched active state when message activity commits after an archive', async () => {
     class EventSocket {
       static instance: EventSocket
@@ -873,11 +919,13 @@ describe('K-Mainstay UI', () => {
     expect(wrapper.get('#conversation-dialog-title').text()).toBe('Create group chat')
     const submit = wrapper.get('[data-testid=create-conversation] button[type=submit]')
     expect(submit.attributes('disabled')).toBeDefined()
-    await wrapper.get('[data-testid=conversation-name]').setValue('Planning')
     await wrapper.get('input[value=b1]').setValue(true)
+		expect((wrapper.get('[data-testid=conversation-name]').element as HTMLInputElement).value).toBe('Hector')
     expect(submit.attributes('disabled')).toBeDefined()
     await wrapper.get('input[value=u2]').setValue(true)
+		expect((wrapper.get('[data-testid=conversation-name]').element as HTMLInputElement).value).toBe('Hector, Mary')
     expect(submit.attributes('disabled')).toBeUndefined()
+		await wrapper.get('[data-testid=conversation-name]').setValue('Planning')
     await wrapper.get('[data-testid=create-conversation]').trigger('submit')
     await flushPromises()
     expect(fetcher).toHaveBeenCalledWith('/api/organisations/o1/conversations', expect.objectContaining({ body: JSON.stringify({ name: 'Planning', visibility: 'members', member_ids: ['b1', 'u2'] }) }))
@@ -924,10 +972,16 @@ describe('K-Mainstay UI', () => {
   })
 
   it('starts a direct chat without a dialog and creates it when the first message is sent', async () => {
+    let conversationLoads = 0
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
+        conversationLoads++
+        return json(conversationLoads === 1
+          ? [{ id: 'c1', name: 'general', visibility: 'organisation' }]
+          : [{ id: 'c1', name: 'general', visibility: 'organisation' }, { id: 'c2', name: 'Improve agent navigation', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: false, latest_sequence: 1 }])
+      }
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'c2', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true, activity_at: '2026-08-24T09:00:00Z' }, 201)
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/conversations/c2/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'c2', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Improve agent navigation', created_at: '2026-08-24T09:00:01Z', sequence: 1 }, 201)
@@ -1120,10 +1174,16 @@ describe('K-Mainstay UI', () => {
 
   it('reuses the conversation creation client ID after an ambiguous response failure', async () => {
     let creationAttempts = 0
+    let conversationLoads = 0
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([{ id: 'c1', name: 'general', visibility: 'organisation' }])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
+        conversationLoads++
+        return json(conversationLoads === 1
+          ? [{ id: 'c1', name: 'general', visibility: 'organisation' }]
+          : [{ id: 'c1', name: 'general', visibility: 'organisation' }, { id: 'c2', name: 'Retry safely', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: false, latest_sequence: 1 }])
+      }
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') {
         creationAttempts++
         if (creationAttempts === 1) return Promise.reject(new Error('response lost'))
@@ -1199,13 +1259,18 @@ describe('K-Mainstay UI', () => {
   })
 
   it('creates and lists a second automatically titled chat with the same direct user', async () => {
+    let conversationLoads = 0
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
-        { id: 'c2', name: 'First topic', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 2 },
-      ])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
+        conversationLoads++
+        return json([
+          { id: 'c1', name: 'general', visibility: 'organisation' },
+          { id: 'c2', name: 'First topic', visibility: 'members', member_ids: ['u1', 'b1'], latest_sequence: 2 },
+          ...(conversationLoads === 1 ? [] : [{ id: 'c3', name: 'Second topic', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: false, latest_sequence: 1 }]),
+        ])
+      }
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'c3', name: 'New Hector session', visibility: 'members', member_ids: ['u1', 'b1'], title_automatic: true }, 201)
       if (url === '/api/conversations/c1/messages?limit=100') return json([])
       if (url === '/api/conversations/c3/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'c3', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Second topic', created_at: '2026-08-24T09:00:01Z', sequence: 1 }, 201)
@@ -1230,13 +1295,18 @@ describe('K-Mainstay UI', () => {
   })
 
   it('starts a group topic without a dialog and creates it when the first message is sent', async () => {
+    let conversationLoads = 0
     const fetcher = vi.fn((url: string, init?: RequestInit) => {
       if (url === '/api/me') return json({ id: 'u1', name: 'Michael', kind: 'human' })
       if (url === '/api/organisations') return json([{ id: 'o1', name: 'Mainstay', role: 'admin' }])
-      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) return json([
-        { id: 'c1', name: 'general', visibility: 'organisation' },
-        { id: 'group1', name: 'Launch planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], latest_sequence: 2 },
-      ])
+      if (url === '/api/organisations/o1/conversations?include_archived=true' && !init) {
+        conversationLoads++
+        return json([
+          { id: 'c1', name: 'general', visibility: 'organisation' },
+          { id: 'group1', name: 'Launch planning', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], latest_sequence: 2 },
+          ...(conversationLoads === 1 ? [] : [{ id: 'group2', name: 'Launch risks', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], title_automatic: false, latest_sequence: 1 }]),
+        ])
+      }
       if (url === '/api/organisations/o1/conversations' && init?.method === 'POST') return json({ id: 'group2', name: 'New Launch planning session', visibility: 'members', member_ids: ['u1', 'b1', 'u2'], title_automatic: true }, 201)
       if (url === '/api/conversations/c1/messages?limit=100' || url === '/api/conversations/group1/messages?limit=100&after_sequence=0') return json([])
       if (url === '/api/conversations/group2/messages' && init?.method === 'POST') return json({ id: 'm1', conversation_id: 'group2', author_id: 'u1', author_name: 'Michael', author_kind: 'human', body: 'Launch risks', created_at: '2026-08-24T09:00:01Z', sequence: 1 }, 201)
@@ -1250,9 +1320,9 @@ describe('K-Mainstay UI', () => {
     const wrapper = mount(App, { global: { provide: { fetcher, socketFactory: class { close() {} } } } })
     await flushPromises()
 
-    await wrapper.get('[data-testid=group-conversations] .conversation-main').trigger('click')
+    await wrapper.get('[data-testid=group-conversations] .group-topic').trigger('click')
     await flushPromises()
-    await wrapper.get('[data-testid=new-group-topic-group1]').trigger('click')
+    await wrapper.get('[data-testid=new-group-topic-b1-u2]').trigger('click')
 
     expect(wrapper.find('[data-testid=create-conversation]').exists()).toBe(false)
     expect(wrapper.get('h1').text()).toBe('# New Launch planning session')

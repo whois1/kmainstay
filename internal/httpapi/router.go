@@ -222,7 +222,7 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	includeArchived := r.URL.Query().Get("include_archived") == "true"
 	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id,coalesce(c.title,c.name),c.visibility,coalesce(crp.sequence,0),coalesce((SELECT max(event.sequence) FROM realtime_events event WHERE event.conversation_id=c.id),0),
 		coalesce((SELECT event.occurred_at FROM realtime_events event WHERE event.conversation_id=c.id ORDER BY event.sequence DESC LIMIT 1),c.created_at),c.title_automatic,
-		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]'),archive.user_id IS NOT NULL
+		coalesce((SELECT json_group_array(user_id) FROM conversation_members WHERE conversation_id=c.id),'[]'),archive.user_id IS NOT NULL,c.is_everyone
 		FROM conversations c
 		JOIN organisation_memberships om ON om.organisation_id=c.organisation_id
 		LEFT JOIN conversation_read_positions crp ON crp.conversation_id=c.id AND crp.user_id=om.user_id
@@ -242,11 +242,11 @@ func (s *server) conversations(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, name, visibility, activityAt, memberIDsJSON string
 		var readSequence, latestSequence int64
-		var titleAutomatic, archived bool
-		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON, &archived) == nil {
+		var titleAutomatic, archived, isEveryone bool
+		if rows.Scan(&id, &name, &visibility, &readSequence, &latestSequence, &activityAt, &titleAutomatic, &memberIDsJSON, &archived, &isEveryone) == nil {
 			var memberIDs []string
 			_ = json.Unmarshal([]byte(memberIDsJSON), &memberIDs)
-			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic, "archived": archived})
+			items = append(items, map[string]any{"id": id, "name": name, "visibility": visibility, "member_ids": memberIDs, "read_sequence": readSequence, "latest_sequence": latestSequence, "activity_at": activityAt, "title_automatic": titleAutomatic, "archived": archived, "is_everyone": isEveryone})
 		}
 	}
 	writeJSON(w, 200, items)
@@ -325,8 +325,15 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,title,title_automatic,visibility,created_at) VALUES(?,?,?,?,?,?,?)`, id, orgID, internalName, in.Name, in.AutomaticTitle, in.Visibility, now); err != nil {
-		writeError(w, http.StatusConflict, "conversation already exists")
+	if in.AutomaticTitle {
+		in.Name, err = uniqueAutomaticConversationName(r.Context(), tx, orgID, "", in.Name)
+		if err != nil {
+			returnServerError(w)
+			return
+		}
+	}
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO conversations(id,organisation_id,name,title,name_normalized,title_automatic,visibility,created_at) VALUES(?,?,?,?,?,?,?,?)`, id, orgID, internalName, in.Name, database.NormalizeConversationName(in.Name), in.AutomaticTitle, in.Visibility, now); err != nil {
+		writeError(w, http.StatusConflict, "conversation name already exists")
 		return
 	}
 	if in.Visibility == "members" {
@@ -391,13 +398,21 @@ func (s *server) updateConversationTitle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	principalID := current(r).ID
-	result, err := s.db.ExecContext(r.Context(), `UPDATE conversations SET title=?,title_automatic=0
+	if s.accessibleEveryoneConversation(r.Context(), conversationID, principalID) {
+		writeError(w, http.StatusConflict, "Everyone cannot be changed")
+		return
+	}
+	result, err := s.db.ExecContext(r.Context(), `UPDATE conversations SET title=?,name_normalized=?,title_automatic=0
 		WHERE id=?
 		AND EXISTS(SELECT 1 FROM organisation_memberships membership WHERE membership.organisation_id=conversations.organisation_id AND membership.user_id=?)
 		AND (visibility='organisation' OR (
 			EXISTS(SELECT 1 FROM conversation_members member WHERE member.conversation_id=conversations.id AND member.user_id=?)
-			AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=conversations.id)>=2))`, input.Name, conversationID, principalID, principalID)
+			AND (SELECT count(*) FROM conversation_members member_count WHERE member_count.conversation_id=conversations.id)>=2))`, input.Name, database.NormalizeConversationName(input.Name), conversationID, principalID, principalID)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: conversations.organisation_id, conversations.name_normalized") {
+			writeError(w, http.StatusConflict, "conversation name already exists")
+			return
+		}
 		returnServerError(w)
 		return
 	}
@@ -501,6 +516,10 @@ func (s *server) archiveConversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "access denied")
 		return
 	}
+	if s.accessibleEveryoneConversation(r.Context(), conversationID, principal.ID) {
+		writeError(w, http.StatusConflict, "Everyone cannot be changed")
+		return
+	}
 	if _, err := s.db.ExecContext(r.Context(), `INSERT OR REPLACE INTO conversation_archives(user_id,conversation_id,archived_at) VALUES(?,?,?)`, principal.ID, conversationID, nowText()); err != nil {
 		returnServerError(w)
 		return
@@ -522,9 +541,31 @@ func (s *server) restoreConversation(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *server) accessibleEveryoneConversation(ctx context.Context, conversationID, userID string) bool {
+	var isEveryone bool
+	err := s.db.QueryRowContext(ctx, `SELECT is_everyone FROM conversations
+		WHERE id=? AND EXISTS(SELECT 1 FROM organisation_memberships WHERE organisation_id=conversations.organisation_id AND user_id=?)
+		AND (visibility='organisation' OR EXISTS(
+			SELECT 1 FROM conversation_members WHERE conversation_id=conversations.id AND user_id=?))`, conversationID, userID, userID).Scan(&isEveryone)
+	return err == nil && isEveryone
+}
+
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	if current(r).Kind != "human" {
 		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+	var isEveryone bool
+	if err := s.db.QueryRowContext(r.Context(), `SELECT EXISTS(
+		SELECT 1 FROM conversations conversation
+		JOIN organisation_memberships membership ON membership.organisation_id=conversation.organisation_id
+		WHERE conversation.id=? AND conversation.organisation_id=? AND conversation.is_everyone=1
+		AND membership.user_id=? AND membership.role='admin')`, r.PathValue("conversation"), r.PathValue("organisation"), current(r).ID).Scan(&isEveryone); err != nil {
+		returnServerError(w)
+		return
+	}
+	if isEveryone {
+		writeError(w, http.StatusConflict, "Everyone cannot be changed")
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -1437,7 +1478,15 @@ func (s *server) insertMessageWithAttachments(ctx context.Context, conversationI
 		}
 		priorBodies.Close()
 		if !hasPriorText {
-			if _, err = tx.ExecContext(ctx, `UPDATE conversations SET title=?,title_automatic=0 WHERE id=? AND title_automatic=1`, title, conversationID); err != nil {
+			var organisationID string
+			if err = tx.QueryRowContext(ctx, `SELECT organisation_id FROM conversations WHERE id=?`, conversationID).Scan(&organisationID); err != nil {
+				return message{}, false, err
+			}
+			uniqueTitle, titleErr := uniqueAutomaticConversationName(ctx, tx, organisationID, conversationID, title)
+			if titleErr != nil {
+				return message{}, false, titleErr
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE conversations SET title=?,name_normalized=?,title_automatic=0 WHERE id=? AND title_automatic=1`, uniqueTitle, database.NormalizeConversationName(uniqueTitle), conversationID); err != nil {
 				return message{}, false, err
 			}
 		}
@@ -1528,6 +1577,22 @@ func (s *server) insertMessageWithAttachments(ctx context.Context, conversationI
 		return message{}, false, err
 	}
 	return m, true, nil
+}
+
+func uniqueAutomaticConversationName(ctx context.Context, tx *sql.Tx, organisationID, excludedConversationID, base string) (string, error) {
+	for suffix := 1; ; suffix++ {
+		candidate := base
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s %d", base, suffix)
+		}
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversations WHERE organisation_id=? AND id<>? AND name_normalized=?)`, organisationID, excludedConversationID, database.NormalizeConversationName(candidate)).Scan(&exists); err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
 }
 
 func messageByClientInTransaction(ctx context.Context, tx *sql.Tx, conversationID string, p principal, clientID string) (message, error) {
