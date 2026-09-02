@@ -45,7 +45,7 @@ An ORM or generated query layer can be added behind the database package later i
 Build and verify one complete path:
 
 1. bootstrap and log in as Michael;
-2. open the default organisation and `general`;
+2. open the default organisation and `Everyone`;
 3. create Hector as a bot user;
 4. copy its one-time API key;
 5. connect a reference bot;

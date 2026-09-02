@@ -56,8 +56,304 @@ func TestConversations_IncludeDefaultReadSequence(t *testing.T) {
 	var conversations []map[string]any
 	response := recorder.Result()
 	decodeResponse(t, response, http.StatusOK, &conversations)
-	if len(conversations) != 1 || conversations[0]["id"] != boot.ConversationID || conversations[0]["read_sequence"] != float64(0) || conversations[0]["latest_sequence"] != float64(0) {
+	if len(conversations) != 1 || conversations[0]["id"] != boot.ConversationID || conversations[0]["name"] != "Everyone" || conversations[0]["is_everyone"] != true || conversations[0]["read_sequence"] != float64(0) || conversations[0]["latest_sequence"] != float64(0) {
 		t.Fatalf("conversations = %#v", conversations)
+	}
+}
+
+func TestMessageEdit_OwnMessageUpdatesBodyAndHistoryWithoutChangingCreationState(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var conversation map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Editing", "visibility": "organisation"}), http.StatusCreated, &conversation)
+	conversationID := conversation["id"].(string)
+	endpoint := server.URL + "/api/conversations/" + conversationID + "/messages"
+	var created map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Before", "client_id": "stable"}), http.StatusCreated, &created)
+	if _, err = db.Exec(`UPDATE conversations SET title='Pinned title',title_automatic=1 WHERE id=?`, conversationID); err != nil {
+		t.Fatal(err)
+	}
+	archiveResponse := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+conversationID+"/archive", server.URL, "", map[string]any{})
+	if archiveResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("archive status = %d: %s", archiveResponse.StatusCode, readBody(archiveResponse))
+	}
+	archiveResponse.Body.Close()
+	var beforeConversations []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations?include_archived=true", server.URL, "", nil), http.StatusOK, &beforeConversations)
+
+	var updated map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, endpoint+"/"+created["id"].(string), server.URL, "", map[string]any{"body": "After"}), http.StatusOK, &updated)
+	if updated["body"] != "After" || updated["id"] != created["id"] || updated["author_id"] != created["author_id"] || updated["created_at"] != created["created_at"] || updated["client_id"] != "stable" || updated["sequence"] != created["sequence"] || updated["edited_at"] == nil {
+		t.Fatalf("updated message = %#v; created = %#v", updated, created)
+	}
+	var listed []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, endpoint, server.URL, "", nil), http.StatusOK, &listed)
+	if len(listed) != 1 || listed[0]["body"] != "After" || listed[0]["edited_at"] != updated["edited_at"] || listed[0]["sequence"] != created["sequence"] {
+		t.Fatalf("history = %#v", listed)
+	}
+	var afterConversations []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations?include_archived=true", server.URL, "", nil), http.StatusOK, &afterConversations)
+	for _, field := range []string{"read_sequence", "latest_sequence", "activity_at", "archived", "name", "title_automatic"} {
+		if beforeConversations[0][field] != afterConversations[0][field] {
+			t.Fatalf("%s changed: before=%#v after=%#v", field, beforeConversations[0], afterConversations[0])
+		}
+	}
+	var creationEventCount, updateEventCount int
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_events WHERE message_id=?`, created["id"]).Scan(&creationEventCount); err != nil || creationEventCount != 1 {
+		t.Fatalf("creation event count = %d, want 1: %v", creationEventCount, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM message_update_events WHERE message_id=?`, created["id"]).Scan(&updateEventCount); err != nil || updateEventCount != 1 {
+		t.Fatalf("update event count = %d, want 1: %v", updateEventCount, err)
+	}
+	var secondCreated map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Second"}), http.StatusCreated, &secondCreated)
+	rows, err := db.Query(`
+		SELECT sequence FROM realtime_events
+		UNION ALL
+		SELECT sequence FROM message_update_events
+		ORDER BY sequence`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var eventSequences []int64
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			t.Fatal(err)
+		}
+		eventSequences = append(eventSequences, sequence)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(eventSequences) != 3 || eventSequences[0] != 1 || eventSequences[1] != 2 || eventSequences[2] != 3 {
+		t.Fatalf("creation-update-creation sequences = %v, want [1 2 3]", eventSequences)
+	}
+	if secondCreated["sequence"] != float64(3) {
+		t.Fatalf("second creation = %#v, want sequence 3", secondCreated)
+	}
+}
+
+func TestMessageEdit_DeniesNonAuthorAndLostAccessAndValidatesEmptyBody(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit-rules.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = db.Exec(`INSERT INTO users(id,kind,email,name,password_hash,created_at) SELECT 'other','human','other@example.com','Other',password_hash,? FROM users WHERE id=?`, now, boot.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,'other','member','other',?)`, boot.OrganisationID, now); err != nil {
+		t.Fatal(err)
+	}
+	otherToken := "other-session"
+	otherDigest := sha256.Sum256([]byte(otherToken))
+	if _, err = db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,'other',?,?)`, otherDigest[:], time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), now); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	owner := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, owner, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	other := newCookieClient(t)
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Jar.SetCookies(serverURL, []*http.Cookie{{Name: "kmainstay_session", Value: otherToken, Path: "/"}})
+	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var created map[string]any
+	decodeResponse(t, requestJSON(t, owner, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Text only"}), http.StatusCreated, &created)
+	editURL := endpoint + "/" + created["id"].(string)
+	denied := requestJSON(t, other, http.MethodPut, editURL, server.URL, "", map[string]any{"body": "Stolen"})
+	if denied.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-author status = %d: %s", denied.StatusCode, readBody(denied))
+	}
+	denied.Body.Close()
+	deniedEmpty := requestJSON(t, other, http.MethodPut, editURL, server.URL, "", map[string]any{"body": ""})
+	if deniedEmpty.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-author empty status = %d, want 403: %s", deniedEmpty.StatusCode, readBody(deniedEmpty))
+	}
+	deniedEmpty.Body.Close()
+	var unicodeBody map[string]any
+	decodeResponse(t, requestJSON(t, owner, http.MethodPut, editURL, server.URL, "", map[string]any{"body": strings.Repeat("é", 10001)}), http.StatusOK, &unicodeBody)
+	empty := requestJSON(t, owner, http.MethodPut, editURL, server.URL, "", map[string]any{"body": "  \n"})
+	if empty.StatusCode != http.StatusBadRequest {
+		t.Fatalf("text-only empty status = %d: %s", empty.StatusCode, readBody(empty))
+	}
+	empty.Body.Close()
+	if _, err = db.Exec(`INSERT INTO attachments(id,message_id,position,storage_key,media_type,byte_size,width,height,original_filename,sha256,created_at) VALUES('attachment',?,0,'key','image/png',1,1,1,'image.png',?,?)`, created["id"], strings.Repeat("a", 64), now); err != nil {
+		t.Fatal(err)
+	}
+	var captionless map[string]any
+	decodeResponse(t, requestJSON(t, owner, http.MethodPut, editURL, server.URL, "", map[string]any{"body": " \t"}), http.StatusOK, &captionless)
+	if captionless["body"] != " \t" || len(captionless["attachments"].([]any)) != 1 {
+		t.Fatalf("captionless = %#v", captionless)
+	}
+	if _, err = db.Exec(`DELETE FROM organisation_memberships WHERE organisation_id=? AND user_id=?`, boot.OrganisationID, boot.UserID); err != nil {
+		t.Fatal(err)
+	}
+	lost := requestJSON(t, owner, http.MethodPut, editURL, server.URL, "", map[string]any{"body": "No access"})
+	if lost.StatusCode != http.StatusForbidden {
+		t.Fatalf("lost-access status = %d: %s", lost.StatusCode, readBody(lost))
+	}
+	lost.Body.Close()
+}
+
+func TestMessageEdit_UnchangedBodyIsNoOpAndEditsAreRateLimitedPerPrincipal(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit-no-op-rate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var created map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Original"}), http.StatusCreated, &created)
+	editURL := endpoint + "/" + created["id"].(string)
+	var unchanged map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, editURL, server.URL, "", map[string]any{"body": "Original"}), http.StatusOK, &unchanged)
+	if unchanged["edited_at"] != nil {
+		t.Fatalf("unchanged edited_at = %#v, want nil", unchanged["edited_at"])
+	}
+	var updateEvents int
+	if err = db.QueryRow(`SELECT count(*) FROM message_update_events WHERE message_id=?`, created["id"]).Scan(&updateEvents); err != nil || updateEvents != 0 {
+		t.Fatalf("unchanged update events = %d, err=%v", updateEvents, err)
+	}
+
+	limited := false
+	for index := 0; index < 21; index++ {
+		response := requestJSON(t, client, http.MethodPut, editURL, server.URL, "", map[string]any{"body": fmt.Sprintf("Edit %d", index)})
+		if response.StatusCode == http.StatusTooManyRequests {
+			limited = true
+			response.Body.Close()
+			break
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("edit %d status = %d: %s", index, response.StatusCode, readBody(response))
+		}
+		response.Body.Close()
+	}
+	if !limited {
+		t.Fatal("edits were not rate limited")
+	}
+}
+
+func TestMessageEdit_ReplaysDurableUpdateToHumansButNotBots(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit-replay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var created map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Hello @Hector"}), http.StatusCreated, &created)
+	createdSequence := int64(created["sequence"].(float64))
+	var deliveriesBefore int
+	if err = db.QueryRow(`SELECT count(*) FROM message_bot_deliveries WHERE message_id=?`, created["id"]).Scan(&deliveriesBefore); err != nil || deliveriesBefore != 1 {
+		t.Fatalf("deliveries before = %d: %v", deliveriesBefore, err)
+	}
+	var updated map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, endpoint+"/"+created["id"].(string), server.URL, "", map[string]any{"body": "Edited without mention"}), http.StatusOK, &updated)
+	var deliveriesAfter, mentionsAfter int
+	if err = db.QueryRow(`SELECT count(*) FROM message_bot_deliveries WHERE message_id=?`, created["id"]).Scan(&deliveriesAfter); err != nil || deliveriesAfter != deliveriesBefore {
+		t.Fatalf("deliveries after = %d: %v", deliveriesAfter, err)
+	}
+	if err = db.QueryRow(`SELECT count(*) FROM message_mentions WHERE message_id=?`, created["id"]).Scan(&mentionsAfter); err != nil || mentionsAfter != 0 {
+		t.Fatalf("mentions after = %d: %v", mentionsAfter, err)
+	}
+
+	humanSocket := dialSocket(t, server.URL+fmt.Sprintf("/api/ws?after=%d", createdSequence), http.Header{"Cookie": {sessionCookieFor(t, client, server.URL).String()}})
+	defer humanSocket.CloseNow()
+	event := readEvent(t, humanSocket)
+	payload := event["payload"].(map[string]any)
+	if event["type"] != "message.updated" || int64(event["sequence"].(float64)) <= createdSequence || int64(payload["sequence"].(float64)) != createdSequence || payload["body"] != "Edited without mention" {
+		t.Fatalf("human replay = %#v", event)
+	}
+	botSocket := dialSocket(t, server.URL+fmt.Sprintf("/api/ws?after=%d", createdSequence), http.Header{"Authorization": {"Bearer " + bot["api_key"].(string)}})
+	defer botSocket.CloseNow()
+	readContext, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err = botSocket.Read(readContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bot received update or unexpected error: %v", err)
+	}
+}
+
+func TestMessageEdit_LateBotReplayPreservesImmutableCreationContent(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit-bot-snapshot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	var bot map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/bots", server.URL, "", map[string]any{"name": "Hector"}), http.StatusCreated, &bot)
+	endpoint := server.URL + "/api/conversations/" + boot.ConversationID + "/messages"
+	var parent map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Original parent"}), http.StatusCreated, &parent)
+	var routed map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"body": "Original @Hector", "reply_to_message_id": parent["id"]}), http.StatusCreated, &routed)
+	// Simulate a message created before migration 11, when creation snapshots did not exist.
+	if _, err = db.Exec(`UPDATE realtime_events SET creation_payload=NULL WHERE message_id=?`, routed["id"]); err != nil {
+		t.Fatal(err)
+	}
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, endpoint+"/"+parent["id"].(string), server.URL, "", map[string]any{"body": "Edited parent"}), http.StatusOK, &map[string]any{})
+	decodeResponse(t, requestJSON(t, client, http.MethodPut, endpoint+"/"+routed["id"].(string), server.URL, "", map[string]any{"body": "Edited without mention"}), http.StatusOK, &map[string]any{})
+
+	botSocket := dialSocket(t, server.URL+"/api/ws?after=0", http.Header{"Authorization": {"Bearer " + bot["api_key"].(string)}})
+	defer botSocket.CloseNow()
+	event := readEvent(t, botSocket)
+	payload := event["payload"].(map[string]any)
+	mentions := payload["mentions"].([]any)
+	reply := payload["reply_to"].(map[string]any)
+	if event["type"] != "message.created" || payload["id"] != routed["id"] || payload["body"] != "Original @Hector" || len(mentions) != 1 || mentions[0].(map[string]any)["name"] != "Hector" || reply["body"] != "Original parent" {
+		t.Fatalf("bot creation replay = %#v", event)
+	}
+	readContext, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err = botSocket.Read(readContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bot received update or unexpected error: %v", err)
 	}
 }
 
@@ -206,6 +502,9 @@ func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
 	defer server.Close()
 	client := newCookieClient(t)
@@ -252,6 +551,40 @@ func TestConversationArchive_HidesRestoresAndReopensOnActivity(t *testing.T) {
 	}
 }
 
+func TestEveryoneConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "everyone-protection.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	requests := []struct {
+		method   string
+		endpoint string
+		body     map[string]any
+	}{
+		{http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/title", map[string]any{"name": "Renamed"}},
+		{http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/archive", nil},
+		{http.MethodDelete, server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + boot.ConversationID, nil},
+	}
+	for _, mutation := range requests {
+		response := requestJSON(t, client, mutation.method, mutation.endpoint, server.URL, "", mutation.body)
+		body := readBody(response)
+		response.Body.Close()
+		if response.StatusCode != http.StatusConflict || !strings.Contains(body, "Everyone cannot be changed") {
+			t.Fatalf("%s %s status = %d body=%s", mutation.method, mutation.endpoint, response.StatusCode, body)
+		}
+	}
+}
+
 func TestConversationTitlesAndLatestActivity(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-titles.db"))
 	if err != nil {
@@ -278,7 +611,7 @@ func TestConversationTitlesAndLatestActivity(t *testing.T) {
 		return conversation
 	}
 	older := createTopic("New Hector session")
-	newer := createTopic("New Hector session")
+	newer := createTopic("Another Hector session")
 
 	var conversations []map[string]any
 	decodeResponse(t, requestJSON(t, client, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &conversations)
@@ -290,7 +623,15 @@ func TestConversationTitlesAndLatestActivity(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('image-only',?,?,?,?)`, older["id"], boot.UserID, "\u00a0", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('image-only-event',?,?,?,?)`, boot.OrganisationID, older["id"], "image-only", now); err != nil {
+	result, err := db.Exec(`INSERT INTO realtime_event_sequences(sequence) VALUES(NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,'image-only-event',?,?,?,?)`, sequence, boot.OrganisationID, older["id"], "image-only", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -341,6 +682,191 @@ func TestConversationCreation_IsIdempotentForClientID(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("automatic conversation count = %d, want 1", count)
+	}
+}
+
+func TestAutomaticPlaceholderCollision_UsesUniqueVisibleNameAndPreservesIdempotency(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "automatic-placeholder-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "New Hector session", "visibility": "organisation"}), http.StatusCreated, &map[string]any{})
+	payload := map[string]any{"name": "New Hector session", "visibility": "organisation", "automatic_title": true, "client_id": "stable-placeholder-create"}
+
+	var created, retry map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", payload), http.StatusCreated, &created)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", payload), http.StatusOK, &retry)
+	if created["name"] != "New Hector session 2" {
+		t.Fatalf("automatic placeholder = %q, want unique visible name", created["name"])
+	}
+	if retry["id"] != created["id"] || retry["name"] != created["name"] {
+		t.Fatalf("retry conversation = %#v, want same conversation as %#v", retry, created)
+	}
+}
+
+func TestAutomaticConversationCreation_ConcurrentRequestsUseUniqueVisibleNames(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "concurrent-automatic-conversations.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+
+	blocker, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineWaitCount := db.Stats().WaitCount
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	payload, err := json.Marshal(map[string]any{"name": "New topic", "visibility": "organisation", "automatic_title": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			request, requestErr := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+			if requestErr != nil {
+				results <- result{err: requestErr}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", server.URL)
+			response, requestErr := client.Do(request)
+			results <- result{response: response, err: requestErr}
+		}()
+	}
+	close(start)
+	deadline := time.Now().Add(3 * time.Second)
+	for db.Stats().WaitCount < baselineWaitCount+2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if db.Stats().WaitCount < baselineWaitCount+2 {
+		_ = blocker.Rollback()
+		t.Fatal("concurrent create requests did not both reach the single database connection")
+	}
+	if err := blocker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	names := map[string]int{}
+	for range 2 {
+		created := <-results
+		if created.err != nil {
+			t.Fatal(created.err)
+		}
+		var conversation map[string]any
+		decodeResponse(t, created.response, http.StatusCreated, &conversation)
+		names[conversation["name"].(string)]++
+	}
+	if names["New topic"] != 1 || names["New topic 2"] != 1 {
+		t.Fatalf("concurrent automatic conversation names = %#v", names)
+	}
+}
+
+func TestAutomaticConversationTitle_RemainsUnique(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "automatic-title-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &map[string]any{})
+	var automatic map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "New topic", "visibility": "organisation", "member_ids": []string{}, "automatic_title": true}), http.StatusCreated, &automatic)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/conversations/"+automatic["id"].(string)+"/messages", server.URL, "", map[string]any{"body": " Straße ", "client_id": "first"}), http.StatusCreated, &map[string]any{})
+
+	var conversations []map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodGet, endpoint, server.URL, "", nil), http.StatusOK, &conversations)
+	var automaticTitle string
+	for _, conversation := range conversations {
+		if conversation["id"] == automatic["id"] {
+			automaticTitle = conversation["name"].(string)
+		}
+	}
+	if automaticTitle != "Straße 2" {
+		t.Fatalf("automatic title = %q, want unique suffix", automaticTitle)
+	}
+}
+
+func TestCreateConversation_RejectsNormalisedVisibleNameConflict(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-name-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "Straße", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &map[string]any{})
+
+	conflict := requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}})
+	defer conflict.Body.Close()
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(readBody(conflict), "conversation name already exists") {
+		t.Fatalf("conflict status = %d, want 409 with clear message", conflict.StatusCode)
+	}
+}
+
+func TestRenameConversation_RejectsNormalisedVisibleNameConflict(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-rename-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(httpapi.New(httpapi.Dependencies{DB: db}))
+	defer server.Close()
+	client := newCookieClient(t)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
+	endpoint := server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations"
+	var first, second map[string]any
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "STRASSE", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &first)
+	decodeResponse(t, requestJSON(t, client, http.MethodPost, endpoint, server.URL, "", map[string]any{"name": "Other", "visibility": "organisation", "member_ids": []string{}}), http.StatusCreated, &second)
+
+	conflict := requestJSON(t, client, http.MethodPut, server.URL+"/api/conversations/"+second["id"].(string)+"/title", server.URL, "", map[string]any{"name": "Straße"})
+	defer conflict.Body.Close()
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(readBody(conflict), "conversation name already exists") {
+		t.Fatalf("conflict status = %d, want 409 with clear message", conflict.StatusCode)
 	}
 }
 
@@ -485,11 +1011,17 @@ func TestPutConversationRead_PersistsValidSequence(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message',?,?,?,?)`, boot.ConversationID, boot.UserID, "hello", now); err != nil {
 		t.Fatal(err)
 	}
-	result, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('event',?,?,?,?)`, boot.OrganisationID, boot.ConversationID, "message", now)
+	result, err := db.Exec(`INSERT INTO realtime_event_sequences(sequence) VALUES(NULL)`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sequence, _ := result.LastInsertId()
+	sequence, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,'event',?,?,?,?)`, sequence, boot.OrganisationID, boot.ConversationID, "message", now); err != nil {
+		t.Fatal(err)
+	}
 	token := "mark-read-session"
 	digest := sha256.Sum256([]byte(token))
 	if _, err := db.Exec(`INSERT INTO human_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)`, digest[:], boot.UserID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), now); err != nil {
@@ -618,11 +1150,17 @@ func newReadPositionFixture(t *testing.T) readPositionFixture {
 		if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES(?,?,?,'message',?)`, messageID, conversationID, boot.UserID, now); err != nil {
 			t.Fatal(err)
 		}
-		result, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,?,?,?,?)`, fmt.Sprintf("fixture-event-%d", index), boot.OrganisationID, conversationID, messageID, now)
+		result, err := db.Exec(`INSERT INTO realtime_event_sequences(sequence) VALUES(NULL)`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sequence, _ := result.LastInsertId()
+		sequence, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,?,?,?,?,?)`, sequence, fmt.Sprintf("fixture-event-%d", index), boot.OrganisationID, conversationID, messageID, now); err != nil {
+			t.Fatal(err)
+		}
 		sequences = append(sequences, sequence)
 	}
 	token := "read-fixture-session"
@@ -1197,6 +1735,9 @@ func TestMessageImage_UploadsReturnsAndAuthorisesPNG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
+		t.Fatal(err)
+	}
 	uploadRoot := filepath.Join(t.TempDir(), "uploads")
 	store, err := attachments.NewFilesystem(uploadRoot)
 	if err != nil {
@@ -1573,7 +2114,7 @@ func TestGeneralConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/session", server.URL, "", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"}), http.StatusOK, &map[string]any{})
 	var listed []map[string]any
 	decodeResponse(t, requestJSON(t, admin, http.MethodGet, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", nil), http.StatusOK, &listed)
-	if len(listed) != 1 || listed[0]["id"] != boot.ConversationID || listed[0]["is_general"] != true {
+	if len(listed) != 1 || listed[0]["id"] != boot.ConversationID || listed[0]["is_everyone"] != true {
 		t.Fatalf("listed General = %#v", listed)
 	}
 
@@ -1583,6 +2124,7 @@ func TestGeneralConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
 	}{
 		{"rename", http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/title", map[string]any{"name": "Renamed"}},
 		{"archive", http.MethodPut, server.URL + "/api/conversations/" + boot.ConversationID + "/archive", nil},
+		{"restore", http.MethodDelete, server.URL + "/api/conversations/" + boot.ConversationID + "/archive", nil},
 		{"delete", http.MethodDelete, server.URL + "/api/organisations/" + boot.OrganisationID + "/conversations/" + boot.ConversationID, nil},
 	}
 	for _, attempt := range attempts {
@@ -1596,8 +2138,8 @@ func TestGeneralConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
 	}
 	var otherConversation map[string]any
 	decodeResponse(t, requestJSON(t, admin, http.MethodPost, server.URL+"/api/organisations/"+boot.OrganisationID+"/conversations", server.URL, "", map[string]any{"name": "Announcements", "visibility": "organisation"}), http.StatusCreated, &otherConversation)
-	if isGeneral, ok := otherConversation["is_general"].(bool); !ok || isGeneral {
-		t.Fatalf("other conversation is_general = %#v", otherConversation["is_general"])
+	if isGeneral, ok := otherConversation["is_everyone"].(bool); !ok || isGeneral {
+		t.Fatalf("other conversation is_everyone = %#v", otherConversation["is_everyone"])
 	}
 	otherID := otherConversation["id"].(string)
 	decodeResponse(t, requestJSON(t, admin, http.MethodPut, server.URL+"/api/conversations/"+otherID+"/title", server.URL, "", map[string]any{"name": "News"}), http.StatusOK, &map[string]any{})
@@ -1618,8 +2160,8 @@ func TestGeneralConversation_CannotBeRenamedArchivedOrDeleted(t *testing.T) {
 	crossOrganisation.Body.Close()
 
 	var title string
-	if err := db.QueryRow(`SELECT coalesce(title,name) FROM conversations WHERE id=?`, boot.ConversationID).Scan(&title); err != nil || title != "general" {
-		t.Fatalf("general title = %q, err=%v", title, err)
+	if err := db.QueryRow(`SELECT coalesce(title,name) FROM conversations WHERE id=?`, boot.ConversationID).Scan(&title); err != nil || title != "Everyone" {
+		t.Fatalf("Everyone title = %q, err=%v", title, err)
 	}
 	var archived, conversations int
 	if err := db.QueryRow(`SELECT count(*) FROM conversation_archives WHERE conversation_id=?`, boot.ConversationID).Scan(&archived); err != nil || archived != 0 {
@@ -1638,6 +2180,9 @@ func TestDeleteConversation_AdminRemovesItForEveryoneAndPreventsFurtherMessages(
 	defer db.Close()
 	boot, err := app.Bootstrap(context.Background(), db, "owner@example.com", "Owner", "correct horse battery staple", "Mainstay")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET is_everyone=0 WHERE id=?`, boot.ConversationID); err != nil {
 		t.Fatal(err)
 	}
 	var passwordHash string

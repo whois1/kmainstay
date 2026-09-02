@@ -7,7 +7,7 @@ import type { Conversation, User } from '../types'
 const styles = readFileSync('frontend/src/style.css', 'utf8')
 
 const conversations: Conversation[] = [
-  { id: 'pinned-old', name: 'General', visibility: 'organisation', is_general: true, latest_sequence: 2 },
+  { id: 'pinned-old', name: 'General', visibility: 'organisation', is_everyone: true, latest_sequence: 2 },
   { id: 'pinned-new', name: 'Announcements', visibility: 'organisation', latest_sequence: 12 },
   { id: 'direct-old', name: 'direct:direct-old', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 4 },
   { id: 'direct-hector-new', name: 'K-Mainstay code', visibility: 'members', member_ids: ['michael', 'hector'], latest_sequence: 11 },
@@ -62,6 +62,22 @@ describe('WorkspaceSidebar', () => {
     expect(wrapper.get('[data-testid=archived-conversations]').text()).toContain('Done')
   })
 
+  it('keeps Everyone out of bulk selection', () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations: [{ id: 'everyone', name: 'Everyone', visibility: 'organisation', is_everyone: true }],
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    expect(wrapper.get('[data-testid=pinned-conversations]').text()).toContain('Everyone')
+    expect(wrapper.find('[data-testid=conversation-checkbox]').exists()).toBe(false)
+  })
+
   it('puts a newly created empty topic first by latest activity', () => {
     const wrapper = mount(WorkspaceSidebar, {
       props: {
@@ -105,7 +121,27 @@ describe('WorkspaceSidebar', () => {
     expect(wrapper.findAll('[data-testid=direct-conversations] .direct-contact > .direct-contact-heading .conversation-label').map(label => label.text())).toEqual(['Hector', 'Mary', 'Alfred', 'Zoe'])
     expect(wrapper.findAll('[data-testid=direct-contact-hector] .direct-topic .conversation-label').map(label => label.text())).toEqual(['K-Mainstay code', 'General'])
     expect(wrapper.findAll('[data-testid=direct-contact-mary] .direct-topic .conversation-label').map(label => label.text())).toEqual(['Forecast review'])
-    expect(wrapper.findAll('[data-testid=group-conversations] .conversation-row .conversation-label').map(label => label.text())).toEqual(['Launch', 'Planning'])
+    expect(wrapper.get('[data-testid="group-thread-hector-mary"] .group-thread-heading .conversation-label').text()).toBe('Hector, Mary')
+    expect(wrapper.findAll('[data-testid="group-thread-hector-mary"] .group-topic .conversation-label').map(label => label.text())).toEqual(['Launch', 'Planning'])
+  })
+
+  it('opens the latest group topic and starts another with the identical member set', async () => {
+    const wrapper = mount(WorkspaceSidebar, {
+      props: {
+        organisation: { id: 'organisation', name: 'Mainstay', role: 'admin' },
+        principal: { id: 'michael', name: 'Michael', kind: 'human' },
+        conversations,
+        users,
+        selected: null,
+        settingsActive: false,
+      },
+    })
+
+    await wrapper.get('[data-testid="group-thread-hector-mary"] .group-thread-button').trigger('click')
+    expect(wrapper.emitted('selectConversation')?.[0]).toEqual([conversations[6]])
+
+    await wrapper.get('[data-testid="new-group-topic-hector-mary"]').trigger('click')
+    expect(wrapper.emitted('newTopic')?.[0]).toEqual([conversations[6]])
   })
 
   it('exposes the current chat programmatically unless settings are active', async () => {
@@ -140,7 +176,7 @@ describe('WorkspaceSidebar', () => {
     })
 
     const checkboxes = wrapper.findAll('[data-testid=conversation-checkbox]')
-    expect(checkboxes).toHaveLength(conversations.filter(conversation => !conversation.is_general).length)
+    expect(checkboxes).toHaveLength(conversations.filter(conversation => !conversation.is_everyone).length)
     await checkboxes[0].trigger('click')
     await checkboxes[2].trigger('click', { shiftKey: true })
 

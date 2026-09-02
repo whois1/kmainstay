@@ -56,6 +56,22 @@ const directContacts = computed(() => {
   })
 })
 
+const groupConversationThreads = computed(() => {
+  const threads = new Map<string, Conversation[]>()
+  for (const conversation of groupConversations.value) {
+    const key = (conversation.member_ids ?? []).filter(userID => userID !== props.principal.id).sort().join('-')
+    const topics = threads.get(key) ?? []
+    topics.push(conversation)
+    threads.set(key, topics)
+  }
+  return [...threads].map(([key, topics]) => {
+    topics.sort(byLatestActivity)
+    const memberIDs = new Set(topics[0]?.member_ids?.filter(userID => userID !== props.principal.id))
+    const label = props.users.filter(user => memberIDs.has(user.id)).map(user => user.name).join(', ')
+    return { key, label, topics }
+  }).sort((left, right) => byLatestActivity(left.topics[0], right.topics[0]))
+})
+
 function directTopicName(conversation: Conversation) {
   return isReservedDirectConversation(conversation) ? 'General' : conversation.name
 }
@@ -73,20 +89,24 @@ function isCurrentDirectContact(topics: Conversation[]) {
   return topics.some(isCurrentConversation)
 }
 
+function isCurrentGroupThread(topics: Conversation[]) {
+  return topics.some(isCurrentConversation)
+}
+
 function openLatestDirectTopic(user: User, topics: Conversation[]) {
   if (topics[0]) emit('selectConversation', topics[0])
   else emit('selectDirectUser', user)
 }
 
 const selectableConversations = computed(() => [
-  ...pinnedConversations.value.filter(conversation => !conversation.is_general),
+  ...pinnedConversations.value,
   ...directContacts.value.flatMap(contact => contact.topics),
   ...removedDirectConversations.value,
-  ...groupConversations.value,
-  ...archivedConversations.value.filter(conversation => !conversation.is_general),
-])
+  ...groupConversationThreads.value.flatMap(thread => thread.topics),
+  ...archivedConversations.value,
+].filter(conversation => !conversation.is_everyone))
 const selectedConversations = computed(() => selectableConversations.value.filter(conversation => selectedConversationIDs.value.has(conversation.id)))
-const canDeleteSelectedConversations = computed(() => selectedConversations.value.length > 0 && selectedConversations.value.every(conversation => !conversation.is_general && (conversation.visibility === 'organisation' || (conversation.member_ids?.length ?? 0) >= 3)))
+const canDeleteSelectedConversations = computed(() => selectedConversations.value.length > 0 && selectedConversations.value.every(conversation => conversation.visibility === 'organisation' || (conversation.member_ids?.length ?? 0) >= 3))
 
 function selectConversationCheckbox(event: MouseEvent, conversation: Conversation) {
   const checkbox = event.currentTarget as HTMLInputElement
@@ -144,8 +164,8 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
     <nav class="sidebar-navigation" aria-label="Conversations">
       <section data-testid="pinned-conversations" aria-labelledby="pinned-heading">
         <h2 id="pinned-heading" class="sidebar-section-heading" aria-label="Pinned"><span aria-hidden="true">⌖</span><span>Pinned</span></h2>
-        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation" :class="{ 'protected-conversation': conversation.is_general }">
-          <input v-if="!conversation.is_general" data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+        <div v-for="conversation in pinnedConversations" :key="conversation.id" class="selectable-conversation">
+          <input v-if="!conversation.is_everyone" data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>
@@ -177,18 +197,25 @@ watch(() => props.completedArchiveConversationIDs, completedConversationIDs => {
       </section>
       <section data-testid="group-conversations" aria-labelledby="group-heading">
         <h2 id="group-heading" class="sidebar-section-heading" aria-label="Group chats"><span aria-hidden="true">◇</span><span>Group chats</span></h2>
-        <div v-for="conversation in groupConversations" :key="conversation.id" class="conversation-row selectable-conversation">
-          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
-          <button class="conversation-main" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
-            <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
-          </button>
-          <button :data-testid="`new-group-topic-${conversation.id}`" class="topic-add" :aria-label="`New chat with the people in ${conversation.name}`" title="New chat with the same people" @click="$emit('newTopic', conversation)">＋</button>
+        <div v-for="thread in groupConversationThreads" :key="thread.key" class="direct-contact group-thread" :data-testid="`group-thread-${thread.key}`">
+          <div class="direct-contact-heading group-thread-heading">
+            <button class="direct-contact-button group-thread-button" :class="{ active: isCurrentGroupThread(thread.topics) }" @click="$emit('selectConversation', thread.topics[0])">
+              <span class="direct-avatar" aria-hidden="true">{{ thread.label.slice(0, 1) }}</span><span class="conversation-label">{{ thread.label }}</span>
+            </button>
+            <button :data-testid="`new-group-topic-${thread.key}`" class="topic-add" :aria-label="`New chat with ${thread.label}`" title="New chat with the same people" @click="$emit('newTopic', thread.topics[0])">＋</button>
+          </div>
+          <div v-for="conversation in thread.topics" :key="conversation.id" class="selectable-conversation">
+            <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name} with ${thread.label}`" @click="selectConversationCheckbox($event, conversation)">
+            <button class="direct-topic group-topic" :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
+              <span class="topic-branch" aria-hidden="true">↳</span><span class="conversation-label">{{ conversation.name }}</span>
+            </button>
+          </div>
         </div>
       </section>
       <section v-if="archivedConversations.length" data-testid="archived-conversations" aria-labelledby="archived-heading">
         <h2 id="archived-heading" class="sidebar-section-heading"><span aria-hidden="true">▣</span><span>Archived</span></h2>
-        <div v-for="conversation in archivedConversations" :key="conversation.id" class="selectable-conversation" :class="{ 'protected-conversation': conversation.is_general }">
-          <input v-if="!conversation.is_general" data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
+        <div v-for="conversation in archivedConversations" :key="conversation.id" class="selectable-conversation">
+          <input data-testid="conversation-checkbox" class="conversation-selector" type="checkbox" :checked="selectedConversationIDs.has(conversation.id)" :aria-label="`Select ${conversation.name}`" @click="selectConversationCheckbox($event, conversation)">
           <button :class="{ active: isCurrentConversation(conversation) }" :aria-current="isCurrentConversation(conversation) ? 'page' : undefined" @click="$emit('selectConversation', conversation)">
             <span class="conversation-hash">#</span><span class="conversation-label">{{ conversation.name }}</span>
           </button>

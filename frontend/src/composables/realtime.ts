@@ -1,9 +1,10 @@
 import type { ConversationActivity, Message } from '../types'
 
 interface MessageCreatedEnvelope { type: 'message.created'; sequence: number; payload: Message }
+interface MessageUpdatedEnvelope { type: 'message.updated'; sequence: number; payload: Message }
 interface ConversationDeletedEnvelope { type: 'conversation.deleted'; payload: { id: string } }
 interface ConversationActivityEnvelope { type: 'conversation.activity'; payload: ConversationActivity }
-type EventEnvelope = MessageCreatedEnvelope | ConversationDeletedEnvelope | ConversationActivityEnvelope
+type EventEnvelope = MessageCreatedEnvelope | MessageUpdatedEnvelope | ConversationDeletedEnvelope | ConversationActivityEnvelope
 type Socket = Pick<WebSocket, 'onopen' | 'onmessage' | 'onclose' | 'close'>
 type SocketConstructor = new (url: string) => Socket
 
@@ -13,6 +14,7 @@ export function useRealtime(
   onConversationDeleted: (conversationID: string) => void = () => {},
   onReconnect: () => void = () => {},
   onActivity: (activity: ConversationActivity) => void = () => {},
+  onMessageUpdated: (message: Message, eventSequence: number) => void = () => {},
 ) {
   let socket: Socket | undefined
   let stopped = false
@@ -35,8 +37,12 @@ export function useRealtime(
         onConversationDeleted(event.payload.id)
         return
       }
-      if (event.type !== 'message.created') return
+      if (event.type !== 'message.created' && event.type !== 'message.updated') return
       lastSequence = Math.max(lastSequence, event.sequence)
+      if (event.type === 'message.updated') {
+        onMessageUpdated(event.payload, event.sequence)
+        return
+      }
       if (seen.has(event.payload.id)) return
       seen.add(event.payload.id)
       onMessage(event.payload)

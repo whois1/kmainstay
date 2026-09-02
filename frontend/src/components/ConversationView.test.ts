@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import ConversationView from './ConversationView.vue'
 import type { Conversation, Message, User } from '../types'
 
-const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', is_general: true, read_sequence: 1 }
+const conversation: Conversation = { id: 'conversation', name: 'general', visibility: 'organisation', is_everyone: true, read_sequence: 1 }
 const groupConversation: Conversation = { id: 'group', name: 'Planning', visibility: 'members', member_ids: ['reader', 'hector', 'mary'], read_sequence: 1 }
 const messages: Message[] = [
   { id: 'first', conversation_id: 'conversation', author_id: 'reader', author_name: 'Reader', author_kind: 'human', body: 'Read', created_at: '2026-01-01T00:00:00Z', sequence: 1 },
@@ -16,6 +16,43 @@ const users: User[] = [
 ]
 
 describe('ConversationView', () => {
+  it('edits only the current users own message inline and keeps edit mode on errors', async () => {
+    const own = { ...messages[0], body: 'Original', edited_at: '2026-01-01T00:00:02Z' }
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [own, messages[1]], composer: 'unsent draft', busy: false, error: '', canDelete: false, currentUserID: 'reader' } })
+
+    expect(wrapper.findAll('[data-testid=edit-message]')).toHaveLength(1)
+    await wrapper.get('[data-testid=edit-message]').trigger('click')
+    const textarea = wrapper.get('[data-testid=message-edit-textarea]')
+    expect((textarea.element as HTMLTextAreaElement).value).toBe('Original')
+    await textarea.setValue('Revised')
+    await wrapper.get('[data-testid=message-edit-form]').trigger('submit')
+    expect(wrapper.emitted('editMessage')).toEqual([['first', 'Revised']])
+    await wrapper.setProps({ error: 'Edit failed' })
+    expect(wrapper.find('[data-testid=message-edit-textarea]').exists()).toBe(true)
+    expect(wrapper.get('[role=alert]').text()).toContain('Edit failed')
+    expect((wrapper.get('textarea[aria-label="Message"]').element as HTMLTextAreaElement).value).toBe('unsent draft')
+    expect(wrapper.text()).toContain('Edited')
+    await wrapper.get('[data-testid=cancel-message-edit]').trigger('click')
+    expect(wrapper.find('[data-testid=message-edit-textarea]').exists()).toBe(false)
+  })
+
+  it('allows an image caption to be cleared', async () => {
+    const imageMessage: Message = {
+      ...messages[0],
+      body: 'Caption',
+      attachments: [{ id: 'attachment', media_type: 'image/png', byte_size: 12, width: 2, height: 1, original_filename: 'image.png', created_at: '2026-01-01T00:00:00Z', content_url: '/api/attachments/attachment/content' }],
+    }
+    const wrapper = mount(ConversationView, { props: { selected: conversation, messages: [imageMessage], composer: '', busy: false, error: '', canDelete: false, currentUserID: 'reader' } })
+
+    await wrapper.get('[data-testid=edit-message]').trigger('click')
+    const textarea = wrapper.get('[data-testid=message-edit-textarea]')
+    expect(textarea.attributes('required')).toBeUndefined()
+    await textarea.setValue('')
+    await wrapper.get('[data-testid=message-edit-form]').trigger('submit')
+
+    expect(wrapper.emitted('editMessage')).toEqual([['first', '']])
+  })
+
   it('shows reply context and emits reply and archive actions', async () => {
     const reply = { id: 'original', author_name: 'Reader', body: 'Original text' }
     const replyMessage: Message = { ...messages[1], reply_to: reply }
@@ -34,6 +71,14 @@ describe('ConversationView', () => {
     expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
     await wrapper.get('[data-testid=restore-conversation]').trigger('click')
     expect(wrapper.emitted('restoreConversation')).toEqual([[]])
+  })
+
+  it('does not offer mutations for Everyone', () => {
+    const wrapper = mount(ConversationView, { props: { selected: { ...conversation, name: 'Everyone', is_everyone: true }, messages: [], composer: '', busy: false, error: '', canDelete: true } })
+
+    expect(wrapper.find('[data-testid=edit-conversation-title]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=archive-conversation]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid=delete-conversation]').exists()).toBe(false)
   })
 
   it('lets the user edit the conversation title inline', async () => {

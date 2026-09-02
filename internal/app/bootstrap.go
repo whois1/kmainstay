@@ -49,7 +49,7 @@ func Bootstrap(ctx context.Context, db *sql.DB, email, name, password, organisat
 		{`INSERT INTO organisations(id,name,created_at) VALUES(?,?,?)`, []any{out.OrganisationID, organisation, now}},
 		{`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES(?,'human',?,?,?,?)`, []any{out.UserID, email, name, passwordHash, now}},
 		{`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES(?,?,'admin',?,?)`, []any{out.OrganisationID, out.UserID, database.NormalizeName(name), now}},
-		{`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES(?,?,?,'organisation',?)`, []any{out.ConversationID, out.OrganisationID, "general", now}},
+		{`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,is_everyone,created_at) VALUES(?,?,?,?,?,'organisation',1,?)`, []any{out.ConversationID, out.OrganisationID, "everyone:" + out.ConversationID, "Everyone", database.NormalizeConversationName("Everyone"), now}},
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {

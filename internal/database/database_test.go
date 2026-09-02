@@ -3,6 +3,7 @@ package database_test
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,14 +24,14 @@ func TestOpen_WhenDatabaseIsNew_MigratesIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "conversation_archives", "messages", "message_mentions", "message_bot_deliveries", "attachments", "human_sessions", "api_keys", "realtime_events", "schema_migrations"} {
+	for _, table := range []string{"organisations", "users", "organisation_memberships", "conversations", "conversation_members", "conversation_read_positions", "conversation_archives", "messages", "message_mentions", "message_bot_deliveries", "attachments", "human_sessions", "api_keys", "realtime_events", "realtime_event_sequences", "message_update_events", "schema_migrations"} {
 		var got string
 		if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&got); err != nil {
 			t.Errorf("missing table %s: %v", table, err)
 		}
 	}
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 10 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var attachmentPositionColumns int
@@ -130,7 +131,7 @@ func TestOpen_MigrationFourBackfillsAccessibleConversationsToLatestSequence(t *t
 		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('public','org','Public','organisation',?)`,
 		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('private','org','Private','members',?)`,
 		`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message','public','author','hello',?)`,
-		`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('event','org','public','message',?)`,
+		`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(1,'event','org','public','message',?)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement, now); err != nil {
@@ -232,6 +233,121 @@ func TestNormalizeName_TrimsUnicodeWhitespaceAndLowercasesUnicode(t *testing.T) 
 	if got := database.NormalizeName("\u2003E\u0301LODIE\u00a0"); got != "élodie" {
 		t.Fatalf("normalised name = %q", got)
 	}
+	if got := database.NormalizeName("Straße"); got != "straße" {
+		t.Fatalf("normalised user name = %q", got)
+	}
+}
+
+func TestNormalizeConversationName_UsesFullUnicodeCaseFolding(t *testing.T) {
+	street := database.NormalizeConversationName("Straße")
+	uppercase := database.NormalizeConversationName("STRASSE")
+	if street != uppercase {
+		t.Fatalf("normalised conversation names differ: %q != %q", street, uppercase)
+	}
+}
+
+func TestOpen_MigratesConversationNamesToUniqueNormalisedValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conversation-names.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`DROP INDEX conversations_visible_name_unique`,
+		`ALTER TABLE conversations DROP COLUMN name_normalized`,
+		`DELETE FROM schema_migrations WHERE version=12`,
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('first','org','first',' École ','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('second','org','second','ÉCOLE','organisation','2026-01-02T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('street','org','street','Straße','organisation','2026-01-03T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,visibility,created_at) VALUES('uppercase-street','org','uppercase-street','STRASSE','organisation','2026-01-04T00:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var firstTitle, firstNormalised, secondTitle, secondNormalised string
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='first'`).Scan(&firstTitle, &firstNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='second'`).Scan(&secondTitle, &secondNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if firstTitle != "École" || firstNormalised != "école" || secondTitle != "ÉCOLE 2" || secondNormalised != "école 2" {
+		t.Fatalf("migrated titles = %q/%q normalized=%q/%q", firstTitle, secondTitle, firstNormalised, secondNormalised)
+	}
+	var streetTitle, streetNormalised, uppercaseStreetTitle, uppercaseStreetNormalised string
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='street'`).Scan(&streetTitle, &streetNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT title,name_normalized FROM conversations WHERE id='uppercase-street'`).Scan(&uppercaseStreetTitle, &uppercaseStreetNormalised); err != nil {
+		t.Fatal(err)
+	}
+	if streetTitle != "Straße" || streetNormalised != "strasse" || uppercaseStreetTitle != "STRASSE 2" || uppercaseStreetNormalised != "strasse 2" {
+		t.Fatalf("case-folded migrated titles = %q/%q normalized=%q/%q", streetTitle, uppercaseStreetTitle, streetNormalised, uppercaseStreetNormalised)
+	}
+	if _, err := db.Exec(`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('third','org','third',' école ','école','organisation','2026-01-05T00:00:00Z')`); err == nil {
+		t.Fatal("duplicate normalised conversation name was accepted")
+	}
+}
+
+func TestOpen_MigratesGeneralToVisibleUnarchivedEveryone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "everyone.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Mainstay','2026-01-01T00:00:00Z')`,
+		`INSERT INTO users(id,kind,email,name,password_hash,created_at) VALUES('owner','human','owner@example.com','Owner','hash','2026-01-01T00:00:00Z')`,
+		`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','owner','admin','owner','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('general','org','general','General','general','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,title,name_normalized,visibility,created_at) VALUES('user-everyone','org','user-everyone','Everyone','everyone','organisation','2026-01-02T00:00:00Z')`,
+		`INSERT INTO conversation_archives(user_id,conversation_id,archived_at) VALUES('owner','general','2026-01-03T00:00:00Z')`,
+		`DROP INDEX conversations_one_everyone_per_organisation`,
+		`ALTER TABLE conversations DROP COLUMN is_everyone`,
+		`DELETE FROM schema_migrations WHERE version=13`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var internalName, title, normalized string
+	var isEveryone bool
+	if err := db.QueryRow(`SELECT name,title,name_normalized,is_everyone FROM conversations WHERE id='general'`).Scan(&internalName, &title, &normalized, &isEveryone); err != nil {
+		t.Fatal(err)
+	}
+	var collisionTitle string
+	if err := db.QueryRow(`SELECT title FROM conversations WHERE id='user-everyone'`).Scan(&collisionTitle); err != nil {
+		t.Fatal(err)
+	}
+	var archiveCount int
+	if err := db.QueryRow(`SELECT count(*) FROM conversation_archives WHERE conversation_id='general'`).Scan(&archiveCount); err != nil {
+		t.Fatal(err)
+	}
+	if internalName != "everyone:general" || title != "Everyone" || normalized != "everyone" || !isEveryone || collisionTitle != "Everyone 2" || archiveCount != 0 {
+		t.Fatalf("everyone name=%q title=%q normalized=%q special=%v collision=%q archives=%d", internalName, title, normalized, isEveryone, collisionTitle, archiveCount)
+	}
 }
 
 func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
@@ -266,7 +382,7 @@ func TestOpen_MigratesVersionTwoCanonicalNameCollisions(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 10 {
+	if err := db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("schema version = %d, err=%v", version, err)
 	}
 	var first, second, firstNormalized, secondNormalized, firstRole, secondRole, firstCreatedAt, secondCreatedAt string
@@ -306,6 +422,7 @@ func TestOpen_MessageAttachmentMigrationPreservesExistingMessagingData(t *testin
 		`INSERT INTO organisation_memberships(organisation_id,user_id,role,name_normalized,created_at) VALUES('org','human','admin','human','2026-01-01T00:00:00Z'),('org','bot','member','bot','2026-01-01T00:00:00Z')`,
 		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('conversation','org','general','organisation','2026-01-01T00:00:00Z')`,
 		`INSERT INTO messages(id,conversation_id,author_id,body,client_id,created_at) VALUES('message','conversation','human','hello','client','2026-01-01T00:00:00Z')`,
+		`INSERT INTO realtime_event_sequences(sequence) VALUES(27)`,
 		`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(27,'event','org','conversation','message','2026-01-01T00:00:00Z')`,
 		`INSERT INTO message_mentions(message_id,user_id,name) VALUES('message','bot','Bot')`,
 		`INSERT INTO message_bot_deliveries(message_id,user_id) VALUES('message','bot')`,
@@ -346,13 +463,96 @@ func TestOpen_MessageAttachmentMigrationPreservesExistingMessagingData(t *testin
 	if _, err := db.Exec(`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('next-message','conversation','human','next','2026-01-01T00:00:01Z')`); err != nil {
 		t.Fatal(err)
 	}
-	result, err := db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('next-event','org','conversation','next-message','2026-01-01T00:00:01Z')`)
+	result, err := db.Exec(`INSERT INTO realtime_event_sequences(sequence) VALUES(NULL)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	nextSequence, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(?,'next-event','org','conversation','next-message','2026-01-01T00:00:01Z')`, nextSequence)
 	if err != nil || nextSequence != 28 {
 		t.Fatalf("next sequence = %d, err=%v", nextSequence, err)
+	}
+}
+
+func TestOpen_MessageEditEventsRejectOldBinaryCreationWrites(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "message-edit-events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Org','2026-01-01T00:00:00Z')`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('author','bot','Author','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('conversation','org','general','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('message','conversation','author','message','2026-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = db.Exec(`INSERT INTO realtime_events(id,organisation_id,conversation_id,message_id,occurred_at) VALUES('event','org','conversation','message','2026-01-01T00:00:00Z')`)
+	if err == nil || !strings.Contains(err.Error(), "realtime_events.sequence is required by the current schema; use the current binary") {
+		t.Fatalf("old-binary insert error = %v", err)
+	}
+	var eventCount, sequenceCount int
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_events WHERE id='event'`).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM realtime_event_sequences`).Scan(&sequenceCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 || sequenceCount != 0 {
+		t.Fatalf("rejected insert wrote event=%d allocator sequences=%d", eventCount, sequenceCount)
+	}
+}
+
+func TestOpen_MessageEditMigrationPreservesDeletedEventSequenceHighWater(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-ten-high-water.db")
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP TRIGGER realtime_events_require_sequence`,
+		`DROP TABLE message_update_events`,
+		`DROP TABLE realtime_event_sequences`,
+		`ALTER TABLE realtime_events DROP COLUMN creation_payload`,
+		`ALTER TABLE messages DROP COLUMN edited_at`,
+		`DELETE FROM schema_migrations WHERE version=11`,
+		`INSERT INTO organisations(id,name,created_at) VALUES('org','Org','2026-01-01T00:00:00Z')`,
+		`INSERT INTO users(id,kind,name,created_at) VALUES('author','bot','Author','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,organisation_id,name,visibility,created_at) VALUES('conversation','org','general','organisation','2026-01-01T00:00:00Z')`,
+		`INSERT INTO messages(id,conversation_id,author_id,body,created_at) VALUES('survivor','conversation','author','survivor','2026-01-01T00:00:00Z'),('deleted','conversation','author','deleted','2026-01-01T00:00:01Z')`,
+		`INSERT INTO realtime_events(sequence,id,organisation_id,conversation_id,message_id,occurred_at) VALUES(1,'survivor-event','org','conversation','survivor','2026-01-01T00:00:00Z'),(100,'deleted-event','org','conversation','deleted','2026-01-01T00:00:01Z')`,
+		`DELETE FROM messages WHERE id='deleted'`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatalf("prepare version ten database with deleted high-water event: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = database.Open(path)
+	if err != nil {
+		t.Fatalf("upgrade version ten database: %v", err)
+	}
+	defer db.Close()
+	result, err := db.Exec(`INSERT INTO realtime_event_sequences(sequence) VALUES(NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextSequence, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextSequence != 101 {
+		t.Fatalf("next sequence = %d, want 101", nextSequence)
 	}
 }
 

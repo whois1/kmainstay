@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BaseDialog from './components/BaseDialog.vue'
 import ConversationView from './components/ConversationView.vue'
 import OrganisationSettings from './components/OrganisationSettings.vue'
@@ -51,17 +51,30 @@ const eligibleEmail = ref('')
 const selectedEligibleUserID = ref('')
 const showAddExisting = ref(false)
 const memberIDs = ref<string[]>([])
+const conversationNameEdited = ref(false)
 let conversationRefreshGeneration = 0
 let conversationSelectionGeneration = 0
 let navigationIntentGeneration = 0
 let messageLoadGeneration = 0
 let loadingConversationID: string | null = null
 let pendingRealtimeMessages: Message[] = []
+let realtimeUpdateGeneration = 0
+const realtimeUpdatesByMessageID = new Map<string, { eventSequence: number; generation: number; message: Message }>()
+type HistoryLoad = { conversationID: string; generationBeforeRequest: number }
+const historyLoadsByConversationID = new Map<string, Set<HistoryLoad>>()
+const pendingLocalEditConversationIDsByMessageID = new Map<string, string>()
 const pendingDirectUserIDs = new Set<string>()
+const pendingAutomaticTitleConversationIDs = new Set<string>()
 const archiveStateGenerations = new Map<string, number>()
 const activities = ref<Record<string, ConversationActivity>>({})
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const selectedActivities = computed(() => Object.values(activities.value).filter(activity => activity.conversation_id === selected.value?.id))
+
+function replaceMessageAndReplyPreviews(updated: Message) {
+  messages.value = messages.value.map(message => message.id === updated.id ? updated : message.reply_to?.id === updated.id ? { ...message, reply_to: { ...message.reply_to, body: updated.body } } : message)
+  pendingRealtimeMessages = pendingRealtimeMessages.map(message => message.id === updated.id ? updated : message.reply_to?.id === updated.id ? { ...message, reply_to: { ...message.reply_to, body: updated.body } } : message)
+  if (replyingTo.value?.id === updated.id) replyingTo.value = updated
+}
 
 function activityKey(conversationID: string, userID: string) {
   return `${conversationID}\u0000${userID}`
@@ -96,6 +109,7 @@ const realtime = useRealtime((message) => {
     conversation.latest_sequence = Math.max(conversation.latest_sequence ?? 0, message.sequence)
     conversation.activity_at = message.created_at
     if (conversation.title_automatic && message.body.trim()) {
+      void reconcileAutomaticConversationTitle(conversation.id)
       conversation.name = message.body.trim()
       conversation.title_automatic = false
     }
@@ -107,7 +121,42 @@ const realtime = useRealtime((message) => {
   if (message.conversation_id === selected.value?.id && !hasNewerMessages.value && !messages.value.some(({ id }) => id === message.id)) {
     messages.value.push(message)
   }
-}, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations, updateActivity)
+}, Socket, conversationID => { void reconcileDeletedConversation(conversationID) }, refreshConversations, updateActivity, (updated, eventSequence) => {
+  const current = realtimeUpdatesByMessageID.get(updated.id)
+  if (current && current.eventSequence >= eventSequence) return
+  const generation = ++realtimeUpdateGeneration
+  if (pendingLocalEditConversationIDsByMessageID.has(updated.id) || realtimeUpdateNeededByHistoryLoad(updated.conversation_id, generation)) {
+    realtimeUpdatesByMessageID.set(updated.id, { eventSequence, generation, message: updated })
+  }
+  replaceMessageAndReplyPreviews(updated)
+})
+
+function realtimeUpdateNeededByHistoryLoad(conversationID: string, generation: number) {
+  return [...(historyLoadsByConversationID.get(conversationID) ?? [])].some(load => generation > load.generationBeforeRequest)
+}
+
+function beginHistoryLoad(conversationID: string): HistoryLoad {
+  const load = { conversationID, generationBeforeRequest: realtimeUpdateGeneration }
+  const loads = historyLoadsByConversationID.get(conversationID) ?? new Set<HistoryLoad>()
+  loads.add(load)
+  historyLoadsByConversationID.set(conversationID, loads)
+  return load
+}
+
+function finishHistoryLoad(load: HistoryLoad) {
+  const loads = historyLoadsByConversationID.get(load.conversationID)
+  loads?.delete(load)
+  if (!loads?.size) historyLoadsByConversationID.delete(load.conversationID)
+  pruneUnneededRealtimeUpdates()
+}
+
+function pruneUnneededRealtimeUpdates() {
+  for (const [messageID, update] of realtimeUpdatesByMessageID) {
+    if (!pendingLocalEditConversationIDsByMessageID.has(messageID) && !realtimeUpdateNeededByHistoryLoad(update.message.conversation_id, update.generation)) {
+      realtimeUpdatesByMessageID.delete(messageID)
+    }
+  }
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetcher(url, init)
@@ -165,6 +214,7 @@ async function selectConversation(conversation: Conversation) {
   const messageURL = latestSequence > readSequence
     ? `/api/conversations/${conversation.id}/messages?limit=100&after_sequence=${readSequence}`
     : `/api/conversations/${conversation.id}/messages?limit=100`
+  const historyLoad = beginHistoryLoad(conversation.id)
   let selectedMessages: Message[]
   let selectedPageMessageCount = 0
   let selectedPageLatestSequence = readSequence
@@ -172,7 +222,10 @@ async function selectConversation(conversation: Conversation) {
     selectedMessages = await request<Message[]>(messageURL)
     selectedPageMessageCount = selectedMessages.length
     selectedPageLatestSequence = selectedMessages.at(-1)?.sequence ?? readSequence
-    if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
+    if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) {
+      finishHistoryLoad(historyLoad)
+      return
+    }
     const firstUnreadMessageID = latestSequence > readSequence ? selectedMessages[0]?.id : undefined
     if (firstUnreadMessageID) {
       try {
@@ -187,9 +240,13 @@ async function selectConversation(conversation: Conversation) {
       loadingConversationID = null
       pendingRealtimeMessages = []
     }
+    finishHistoryLoad(historyLoad)
     throw cause
   }
-  if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) return
+  if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id || !conversations.value.some(({ id }) => id === conversation.id)) {
+    finishHistoryLoad(historyLoad)
+    return
+  }
   const realtimeMessages = loadGeneration === messageLoadGeneration ? pendingRealtimeMessages : []
   if (loadGeneration === messageLoadGeneration) {
     loadingConversationID = null
@@ -197,7 +254,8 @@ async function selectConversation(conversation: Conversation) {
   }
   const currentLatestSequence = conversations.value.find(({ id }) => id === conversation.id)?.latest_sequence ?? latestSequence
   const boundedPageMayHaveGap = selectedPageMessageCount === 100 && selectedPageLatestSequence < currentLatestSequence
-  messages.value = boundedPageMayHaveGap ? selectedMessages : mergeMessages(selectedMessages, realtimeMessages)
+  messages.value = applyRealtimeUpdates(boundedPageMayHaveGap ? selectedMessages : mergeMessages(selectedMessages, realtimeMessages), historyLoad)
+  finishHistoryLoad(historyLoad)
   hasNewerMessages.value = (messages.value.at(-1)?.sequence ?? readSequence) < currentLatestSequence
   realtime.seed(messages.value)
   activeView.value = 'chat'
@@ -210,11 +268,12 @@ async function jumpToLatest() {
   const loadGeneration = ++messageLoadGeneration
   loadingConversationID = conversation.id
   pendingRealtimeMessages = []
+  const historyLoad = beginHistoryLoad(conversation.id)
   try {
     const latestMessages = await request<Message[]>(`/api/conversations/${conversation.id}/messages?limit=100`)
     if (selectionGeneration !== conversationSelectionGeneration || selected.value?.id !== conversation.id) return
     const realtimeMessages = loadGeneration === messageLoadGeneration ? pendingRealtimeMessages : []
-    messages.value = mergeMessages(latestMessages, realtimeMessages)
+    messages.value = applyRealtimeUpdates(mergeMessages(latestMessages, realtimeMessages), historyLoad)
     const currentLatestSequence = conversations.value.find(({ id }) => id === conversation.id)?.latest_sequence ?? conversation.latest_sequence ?? 0
     hasNewerMessages.value = (messages.value.at(-1)?.sequence ?? 0) < currentLatestSequence
     realtime.seed(messages.value)
@@ -222,6 +281,7 @@ async function jumpToLatest() {
   } catch (cause) {
     if (selectionGeneration === conversationSelectionGeneration && selected.value?.id === conversation.id) error.value = messageOf(cause)
   } finally {
+    finishHistoryLoad(historyLoad)
     if (loadGeneration === messageLoadGeneration) {
       loadingConversationID = null
       pendingRealtimeMessages = []
@@ -233,6 +293,25 @@ function mergeMessages(loadedMessages: Message[], realtimeMessages: Message[]) {
   const messagesByID = new Map(loadedMessages.map(message => [message.id, message]))
   for (const message of realtimeMessages) messagesByID.set(message.id, message)
   return [...messagesByID.values()].sort((left, right) => left.sequence - right.sequence)
+}
+
+function applyRealtimeUpdates(loadedMessages: Message[], historyLoad: HistoryLoad) {
+  let updatedMessages = loadedMessages
+  for (const { generation, message: updated } of realtimeUpdatesByMessageID.values()) {
+    if (updated.conversation_id !== historyLoad.conversationID || generation <= historyLoad.generationBeforeRequest) continue
+    updatedMessages = updatedMessages.map(message => message.id === updated.id ? updated : message.reply_to?.id === updated.id ? { ...message, reply_to: { ...message.reply_to, body: updated.body } } : message)
+  }
+  return updatedMessages
+}
+
+function pruneRealtimeUpdatesForConversation(conversationID: string) {
+  historyLoadsByConversationID.delete(conversationID)
+  for (const [messageID, pendingConversationID] of pendingLocalEditConversationIDsByMessageID) {
+    if (pendingConversationID === conversationID) pendingLocalEditConversationIDsByMessageID.delete(messageID)
+  }
+  for (const [messageID, update] of realtimeUpdatesByMessageID) {
+    if (update.message.conversation_id === conversationID) realtimeUpdatesByMessageID.delete(messageID)
+  }
 }
 
 function updateComposerDraft(value: string) {
@@ -304,6 +383,7 @@ async function sendMessage() {
       selected.value!.latest_sequence = Math.max(selected.value!.latest_sequence ?? 0, message.sequence)
       selected.value!.activity_at = message.created_at
       if (selected.value!.title_automatic && message.body.trim()) {
+        void reconcileAutomaticConversationTitle(selected.value!.id)
         selected.value!.name = message.body.trim()
         selected.value!.title_automatic = false
       }
@@ -318,6 +398,27 @@ async function sendMessage() {
       error.value = messageOf(cause)
     }
   } finally { busy.value = false }
+}
+
+async function editMessage(messageID: string, body: string) {
+  if (!selected.value || busy.value) return
+  const conversationID = selected.value.id
+  const realtimeUpdateGenerationBeforeRequest = realtimeUpdateGeneration
+  pendingLocalEditConversationIDsByMessageID.set(messageID, conversationID)
+  busy.value = true
+  error.value = ''
+  try {
+    const updated = await request<Message>(`/api/conversations/${conversationID}/messages/${messageID}`, jsonInit('PUT', { body }))
+    if (selected.value?.id === conversationID && (realtimeUpdatesByMessageID.get(messageID)?.generation ?? 0) <= realtimeUpdateGenerationBeforeRequest) {
+      replaceMessageAndReplyPreviews(updated)
+    }
+  } catch (cause) {
+    if (selected.value?.id === conversationID) error.value = messageOf(cause)
+  } finally {
+    pendingLocalEditConversationIDsByMessageID.delete(messageID)
+    pruneUnneededRealtimeUpdates()
+    busy.value = false
+  }
 }
 
 async function markReadThrough(sequence: number) {
@@ -452,9 +553,16 @@ async function openConversationDialog() {
   users.value = conversationUsers
   beginConversationDialog()
   conversationName.value = ''
+  conversationNameEdited.value = false
   memberIDs.value = []
   showConversation.value = true
 }
+
+watch(memberIDs, selectedMemberIDs => {
+  if (conversationNameEdited.value) return
+  const selectedMemberIDSet = new Set(selectedMemberIDs)
+  conversationName.value = users.value.filter(user => selectedMemberIDSet.has(user.id)).map(user => user.name).join(', ')
+})
 
 function openDirectTopicDialog(user: User) {
   navigationIntentGeneration++
@@ -643,6 +751,7 @@ async function deleteConversationsInBulk(selectedConversations: Conversation[]) 
     request<void>(`/api/organisations/${organisationID}/conversations/${conversation.id}`, jsonInit('DELETE')),
   ))
   const deletedConversationIDs = new Set(selectedConversations.filter((_conversation, index) => results[index].status === 'fulfilled').map(conversation => conversation.id))
+  for (const conversationID of deletedConversationIDs) pruneRealtimeUpdatesForConversation(conversationID)
   conversations.value = conversations.value.filter(conversation => !deletedConversationIDs.has(conversation.id))
   if (selected.value && deletedConversationIDs.has(selected.value.id)) {
     conversationSelectionGeneration++
@@ -659,6 +768,7 @@ async function deleteConversationsInBulk(selectedConversations: Conversation[]) 
 }
 
 async function handleConversationDeleted(conversationID: string) {
+  pruneRealtimeUpdatesForConversation(conversationID)
   if (!conversations.value.some(conversation => conversation.id === conversationID)) return
   conversations.value = conversations.value.filter(conversation => conversation.id !== conversationID)
   if (selected.value?.id !== conversationID) return
@@ -674,6 +784,16 @@ async function handleConversationDeleted(conversationID: string) {
 async function reconcileDeletedConversation(conversationID: string) {
   await handleConversationDeleted(conversationID)
   await refreshConversations()
+}
+
+async function reconcileAutomaticConversationTitle(conversationID: string) {
+  if (pendingAutomaticTitleConversationIDs.has(conversationID)) return
+  pendingAutomaticTitleConversationIDs.add(conversationID)
+  try {
+    await refreshConversations()
+  } finally {
+    pendingAutomaticTitleConversationIDs.delete(conversationID)
+  }
 }
 
 async function refreshConversations() {
@@ -744,7 +864,7 @@ onBeforeUnmount(() => {
   </main>
   <main v-else class="workspace">
     <WorkspaceSidebar :organisation="organisation" :principal="me" :conversations="conversations" :users="users" :selected="selected" :settings-active="activeView === 'settings'" :busy="busy" :completed-archive-conversation-i-ds="completedArchiveConversationIDs" @open-settings="openOrganisation" @new-conversation="openConversationDialog" @new-direct-topic="openDirectTopicDialog" @new-topic="openTopicDialog" @select-direct-user="selectDirectUser" @select-conversation="selectConversation" @archive-conversations="archiveConversationsInBulk" @delete-conversations="deleteConversationsInBulk" />
-    <ConversationView v-if="activeView === 'chat'" :composer="composer" :images="images" :activities="selectedActivities" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin' && !selected?.is_general && (selected?.visibility === 'organisation' || (selected?.member_ids?.length ?? 0) >= 3)" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:images="updateImagesDraft" @update-title="updateConversationTitle" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
+    <ConversationView v-if="activeView === 'chat'" :composer="composer" :images="images" :activities="selectedActivities" :replying-to="replyingTo" :selected="selected" :messages="messages" :users="users" :current-user-i-d="me.id" :busy="busy" :title-busy="titleSavingConversationIDs.has(selected?.id ?? '')" :error="error" :can-delete="organisation?.role === 'admin' && !selected?.is_everyone && (selected?.visibility === 'organisation' || (selected?.member_ids?.length ?? 0) >= 3)" :has-newer-messages="hasNewerMessages" :jump-to-latest-version="jumpToLatestVersion" @update:composer="updateComposerDraft" @update:images="updateImagesDraft" @update-title="updateConversationTitle" @edit-message="editMessage" @reply-to="selectReply" @cancel-reply="cancelReply" @archive-conversation="setSelectedConversationArchived(true)" @restore-conversation="setSelectedConversationArchived(false)" @delete-conversation="deleteSelectedConversation" @new-topic="selected && openTopicDialog(selected)" @send-message="sendMessage" @read-through="markReadThrough" @jump-to-latest="jumpToLatest" />
     <OrganisationSettings v-else v-model:eligible-email="eligibleEmail" :organisation="organisation" :users="users" :eligible-users="eligibleUsers" :show-add-existing="showAddExisting" :notice="notice" :error="error" :bot-mutation-i-d="botMutationID" :removing-bot-i-d="removingBotID" @back="activeView = 'chat'" @toggle-add-existing="showAddExisting = !showAddExisting" @search-existing-user="searchExistingUser" @add-existing-user="addExistingUser" @add-bot="addUserStep = 'bot'" @rotate-key="rotateBotKey" @revoke-key="revokeBotKey" @begin-remove-bot="removingBotID = $event" @cancel-remove-bot="removingBotID = ''" @remove-bot="removeBot" />
   </main>
 
@@ -756,6 +876,6 @@ onBeforeUnmount(() => {
 
   <BaseDialog v-if="showConversation" labelledby="conversation-dialog-title" @close="closeConversationDialog">
     <div class="dialog-header"><div><p class="dialog-context">New group chat</p><h2 id="conversation-dialog-title">Create group chat</h2></div><button data-testid="close-conversation-dialog" type="button" class="close" aria-label="Close" @click="closeConversationDialog">×</button></div>
-    <form data-testid="create-conversation" class="group-chat-form" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" @submit.prevent="createConversation"><label>Name<input data-testid="conversation-name" v-model="conversationName" name="group_chat_title" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-dialog-initial-focus required placeholder="e.g. Planning"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < 2">{{ creatingConversation ? 'Creating…' : 'Create group chat' }}</button></form>
+    <form data-testid="create-conversation" class="group-chat-form" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" @submit.prevent="createConversation"><label>Name<input data-testid="conversation-name" v-model="conversationName" name="group_chat_title" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-dialog-initial-focus required placeholder="e.g. Planning" @input="conversationNameEdited = true"></label><fieldset><legend>People (select at least two)</legend><label v-for="user in users.filter(u => u.id !== me?.id)" :key="user.id" class="check"><input v-model="memberIDs" type="checkbox" :value="user.id"><span>{{ user.name }} <small>{{ user.kind }}</small></span></label></fieldset><button type="submit" :disabled="creatingConversation || !conversationName.trim() || memberIDs.length < 2">{{ creatingConversation ? 'Creating…' : 'Create group chat' }}</button></form>
   </BaseDialog>
 </template>

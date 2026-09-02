@@ -13,7 +13,7 @@ Michael is the only human user initially. Human invitations and public registrat
 ## First complete experience
 
 1. Michael logs in to the web application.
-2. Michael opens the default organisation and `general` conversation.
+2. Michael opens the default organisation and `Everyone` conversation.
 3. Michael creates a user named Hector with type `bot`.
 4. K-Mainstay displays one copy-once API key.
 5. Michael gives that key to Hector and asks it to connect.
@@ -43,6 +43,7 @@ The agent runtime remains external. Hector is the durable K-Mainstay user identi
 - private conversations with one or more selected users;
 - permanent organisation-wide General, personally archivable direct chats, and admin-only global deletion of other user-created conversations;
 - chronological messages;
+- author-only inline editing of message text and image captions, with an Edited marker and durable human-client replay;
 - safe Markdown rendering, including code blocks;
 - up to ten JPEG or PNG attachments per message, each up to 10 MB and together up to 20 MB, stored locally behind authorised API access;
 - one copy-once API key per bot initially;
@@ -61,7 +62,7 @@ Bots decide whether to respond. The server does not interpret mentions as mandat
 - roles and fine-grained permissions;
 - API-key scopes;
 - nested threads and replies;
-- general files, multiple images, image processing, reactions, search, notifications, message editing, and message or attachment deletion;
+- general files, image processing, reactions, search, notifications, and message or attachment deletion;
 - streaming responses, typing, reasoning, and activity displays;
 - desktop and mobile applications;
 - projects, shared instructions, skills, memory, capabilities, orchestration, and a central brain;
@@ -75,7 +76,7 @@ The MVP slice is complete only when a clean local instance can demonstrate:
 2. login through the Vue web app;
 3. create Hector and copy its API key;
 4. connect a reference bot using only the service URL and key;
-5. exchange Markdown and image messages in `general` without refreshing;
+5. exchange Markdown and image messages in `Everyone` without refreshing;
 6. restart the Go process and retain the database and attachment bytes;
 7. revoke Hector’s key and observe access denial;
 8. pass backend, frontend, race, type, build, and end-to-end checks.
